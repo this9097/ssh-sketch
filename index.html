@@ -101,6 +101,7 @@
     <button class="zoomBtn" id="zoomIn">＋</button>
     <button class="zoomBtn" id="zoomFit">맞춤</button>
     <button class="zoomBtn" id="layerBtn">레이어</button>
+    <button class="zoomBtn" id="resizeCanvasBtn">크기변경</button>
     <button class="zoomBtn" id="newCanvasBtn">새 캔버스</button>
   </div>
 
@@ -145,7 +146,7 @@
 
   <div id="newCanvasMenu" class="sheetOverlay open">
     <div class="sheetCard">
-      <h3>캔버스 크기 선택</h3>
+      <h3 id="newCanvasTitle">캔버스 크기 선택</h3>
       <button class="saveOpt" data-w="1080" data-h="1080">정사각형 (1080 × 1080)</button>
       <button class="saveOpt" data-w="1080" data-h="1920">세로 9:16 (1080 × 1920)</button>
       <button class="saveOpt" data-w="1920" data-h="1080">가로 16:9 (1920 × 1080)</button>
@@ -500,6 +501,33 @@ function startNewCanvas(w, h) {
   document.getElementById('newCanvasMenu').classList.remove('open');
 }
 
+function resizeExistingCanvas(w, h) {
+  if (!layers.length) { startNewCanvas(w, h); return; }
+  const snapshots = layers.map(l => {
+    const t = document.createElement('canvas');
+    t.width = l.el.width;
+    t.height = l.el.height;
+    t.getContext('2d').drawImage(l.el, 0, 0);
+    return t;
+  });
+  setupCanvasSize(w, h);
+  layers.forEach((l, i) => {
+    l.el.width = canvas.width;
+    l.el.height = canvas.height;
+    l.ctx.setTransform(1, 0, 0, 1, 0, 0);
+    l.ctx.drawImage(snapshots[i], 0, 0, snapshots[i].width, snapshots[i].height, 0, 0, canvas.width, canvas.height);
+    l.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    l.ctx.lineCap = 'round';
+    l.ctx.lineJoin = 'round';
+  });
+  ctx = layers[activeLayerIndex].ctx;
+  history = [];
+  compositeLayers();
+  fitZoomToContainer();
+  document.getElementById('newCanvasMenu').classList.remove('open');
+  scheduleAutosave();
+}
+
 window.addEventListener('resize', () => {
   if (canvasLogicalW) fitZoomToContainer();
 });
@@ -532,10 +560,20 @@ document.getElementById('zoomFit').addEventListener('click', () => {
 // ---------- New-canvas size picker ----------
 
 const newCanvasMenu = document.getElementById('newCanvasMenu');
+let resizeMode = false;
+
+function openSizePicker(mode) {
+  resizeMode = mode;
+  document.getElementById('newCanvasTitle').textContent = mode ? '캔버스 크기 변경 (그림 유지, 늘이거나 줄임)' : '캔버스 크기 선택';
+  document.getElementById('continueBtn').style.display = mode ? 'none' : 'block';
+  newCanvasMenu.classList.add('open');
+}
 
 document.querySelectorAll('#newCanvasMenu .saveOpt[data-w]').forEach(btn => {
   btn.addEventListener('click', () => {
-    startNewCanvas(parseInt(btn.dataset.w), parseInt(btn.dataset.h));
+    const w = parseInt(btn.dataset.w), h = parseInt(btn.dataset.h);
+    if (resizeMode) resizeExistingCanvas(w, h);
+    else startNewCanvas(w, h);
   });
 });
 
@@ -546,7 +584,9 @@ document.getElementById('customStartBtn').addEventListener('click', () => {
     alert('가로/세로 값을 50 이상으로 입력해주세요.');
     return;
   }
-  startNewCanvas(Math.min(w, 4000), Math.min(h, 4000));
+  const cw = Math.min(w, 4000), ch = Math.min(h, 4000);
+  if (resizeMode) resizeExistingCanvas(cw, ch);
+  else startNewCanvas(cw, ch);
 });
 
 document.getElementById('continueBtn').addEventListener('click', async () => {
@@ -562,7 +602,11 @@ document.getElementById('closeNewCanvasMenu').addEventListener('click', () => {
 
 document.getElementById('newCanvasBtn').addEventListener('click', () => {
   if (canvasLogicalW && !confirm('현재 작업 중인 캔버스를 닫고 새로 시작할까요? (저장된 작업은 그대로 남아있습니다)')) return;
-  newCanvasMenu.classList.add('open');
+  openSizePicker(false);
+});
+
+document.getElementById('resizeCanvasBtn').addEventListener('click', () => {
+  openSizePicker(true);
 });
 
 function saveHistory() {
