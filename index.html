@@ -1185,14 +1185,36 @@ function removeSpeckles(isBlack, w, h, minSize) {
   return isBlack;
 }
 
+// 1픽셀짜리 가는 선은 나중에 캔버스 크기에 맞춰 확대할 때 흐릿하게 뭉개져 거의 안 보이게 된다.
+// 잡점을 지운 뒤, 선을 살짝 두껍게 부풀려서 확대해도 또렷이 보이도록 한다.
+function dilate(isBlack, w, h, times) {
+  let cur = isBlack;
+  for (let t = 0; t < times; t++) {
+    const out = cur.slice();
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const idx = y * w + x;
+        if (cur[idx]) continue;
+        if ((x > 0 && cur[idx - 1]) || (x < w - 1 && cur[idx + 1]) ||
+            (y > 0 && cur[idx - w]) || (y < h - 1 && cur[idx + w])) {
+          out[idx] = 1;
+        }
+      }
+    }
+    cur = out;
+  }
+  return cur;
+}
+
 // 사진 → 색칠용 밑그림.
 // 1) 강하게 흐림 처리해서 잔 텍스처/노이즈를 억제하고 큰 윤곽만 남긴다
 // 2) 소벨로 경계 강도·방향을 구한다
 // 3) 그 방향으로 국소 최대만 남겨(비최대 억제) 두꺼운 얼룩이 아니라 가는 선을 얻는다
 // 4) 사진마다 경계 강도 분포를 분석해 임계값을 자동으로 정한다
 // 5) 남은 자잘한 잡점(노이즈)을 지운다
+// 6) 선을 살짝 두껍게 부풀려서, 캔버스 크기에 맞춰 확대해도 흐려지지 않게 한다
 function photoToLineArtCanvas(img, edgePercentile) {
-  const procW = Math.min(1400, img.width);
+  const procW = Math.min(1600, img.width);
   const scale = procW / img.width;
   const procH = Math.max(1, Math.round(img.height * scale));
 
@@ -1241,11 +1263,12 @@ function photoToLineArtCanvas(img, edgePercentile) {
   const threshold = computeAdaptiveThreshold(thin, edgePercentile);
   const band = Math.max(2, threshold * 0.15);
 
-  const isBlack = new Uint8Array(procW * procH);
+  let isBlack = new Uint8Array(procW * procH);
   for (let i = 0; i < thin.length; i++) {
     isBlack[i] = smoothstep(threshold - band, threshold + band, thin[i]) > 0.5 ? 1 : 0;
   }
   removeSpeckles(isBlack, procW, procH, 4);
+  isBlack = dilate(isBlack, procW, procH, 1);
 
   const out = new Uint8ClampedArray(procW * procH * 4);
   for (let i = 0; i < isBlack.length; i++) {
@@ -1291,7 +1314,9 @@ document.getElementById('photoInput').addEventListener('change', (e) => {
           const lineArt = photoToLineArtCanvas(img, 0.94);
           refLayer.ctx.fillStyle = '#ffffff';
           refLayer.ctx.fillRect(0, 0, cw, ch);
+          refLayer.ctx.imageSmoothingEnabled = false; // 확대해서 그릴 때 선이 흐려지지 않도록
           refLayer.ctx.drawImage(lineArt, dx, dy, dw, dh);
+          refLayer.ctx.imageSmoothingEnabled = true;
           refLayer.opacity = 1;
           refLayer.name = '사진 색칠 밑그림';
         } else {
