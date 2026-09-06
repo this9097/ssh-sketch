@@ -99,8 +99,9 @@
     <button class="zoomBtn" id="zoomOut">－</button>
     <span id="zoomLabel">100%</span>
     <button class="zoomBtn" id="zoomIn">＋</button>
-    <button class="zoomBtn" id="zoomReset">원본</button>
+    <button class="zoomBtn" id="zoomFit">맞춤</button>
     <button class="zoomBtn" id="layerBtn">레이어</button>
+    <button class="zoomBtn" id="newCanvasBtn">새 캔버스</button>
   </div>
 
   <div id="brushRow">
@@ -139,6 +140,24 @@
       <button class="saveOpt" data-fmt="webp">WebP로 저장<small>고화질 + 작은 용량</small></button>
       <button class="saveOpt" id="shareOpt">공유하기<small>카톡 등으로 바로 보내기</small></button>
       <button class="sheetClose" id="closeSaveMenu">닫기</button>
+    </div>
+  </div>
+
+  <div id="newCanvasMenu" class="sheetOverlay open">
+    <div class="sheetCard">
+      <h3>캔버스 크기 선택</h3>
+      <button class="saveOpt" data-w="1080" data-h="1080">정사각형 (1080 × 1080)</button>
+      <button class="saveOpt" data-w="1080" data-h="1920">세로 9:16 (1080 × 1920)</button>
+      <button class="saveOpt" data-w="1920" data-h="1080">가로 16:9 (1920 × 1080)</button>
+      <button class="saveOpt" data-w="2480" data-h="3508">인쇄용 A4 (2480 × 3508)</button>
+      <div style="display:flex; gap:8px; align-items:center; margin: 10px 0;">
+        <input type="number" id="customW" placeholder="가로(px)" style="width:45%; padding:8px; border-radius:8px; border:none; background:#3a3a3c; color:#fff;">
+        <span style="color:#8e8e93;">×</span>
+        <input type="number" id="customH" placeholder="세로(px)" style="width:45%; padding:8px; border-radius:8px; border:none; background:#3a3a3c; color:#fff;">
+      </div>
+      <button class="saveOpt" id="customStartBtn">직접 입력한 크기로 시작</button>
+      <button class="saveOpt" id="continueBtn">이어서 그리기 (이전 작업 불러오기)</button>
+      <button class="sheetClose" id="closeNewCanvasMenu">취소</button>
     </div>
   </div>
 
@@ -212,6 +231,8 @@ async function saveToCloud() {
     cloudStatus.textContent = '저장 중...';
     const payload = {
       updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+      width: cssWidth,
+      height: cssHeight,
       layers: layers.map(l => ({
         name: l.name,
         opacity: l.opacity,
@@ -239,6 +260,7 @@ async function loadFromCloud() {
     const data = snap.data();
     if (!data.layers || !data.layers.length) { cloudStatus.textContent = '저장된 작업 없음'; return false; }
 
+    setupCanvasSize(data.width || 1080, data.height || 1080);
     layers = [];
     activeLayerIndex = 0;
     for (const Ld of data.layers) {
@@ -265,6 +287,7 @@ async function loadFromCloud() {
     history = [];
     renderLayerPanel();
     compositeLayers();
+    fitZoomToContainer();
     cloudStatus.textContent = '클라우드에서 불러옴';
     return true;
   } catch (e) {
@@ -289,6 +312,7 @@ let lastPressure = 0.5;
 let dpr = window.devicePixelRatio || 1;
 let zoomLevel = 1;
 let cssWidth = 0, cssHeight = 0;
+let canvasLogicalW = 0, canvasLogicalH = 0;
 let memoryDraft = null;
 let autosaveTimer = null;
 let airbrushTimer = null;
@@ -449,51 +473,48 @@ document.getElementById('delLayerBtn').addEventListener('click', () => {
   scheduleAutosave();
 });
 
-// ---------- Canvas / display sizing (HiDPI) ----------
+// ---------- Canvas / display sizing (HiDPI, fixed logical size chosen up front) ----------
 
-function resizeCanvas() {
-  const rect = wrap.getBoundingClientRect();
-  cssWidth = rect.width;
-  cssHeight = rect.height;
+function setupCanvasSize(w, h) {
+  canvasLogicalW = w;
+  canvasLogicalH = h;
+  cssWidth = w;
+  cssHeight = h;
   const newW = Math.round(cssWidth * dpr);
   const newH = Math.round(cssHeight * dpr);
-
-  const temps = layers.map(l => {
-    if (!l.el.width || !l.el.height) return null;
-    const t = document.createElement('canvas');
-    t.width = l.el.width;
-    t.height = l.el.height;
-    t.getContext('2d').drawImage(l.el, 0, 0);
-    return t;
-  });
-
   canvas.width = newW;
   canvas.height = newH;
   canvas.style.width = cssWidth + 'px';
   canvas.style.height = cssHeight + 'px';
-
-  layers.forEach((l, i) => {
-    l.el.width = newW;
-    l.el.height = newH;
-    l.ctx.setTransform(1, 0, 0, 1, 0, 0);
-    if (temps[i]) l.ctx.drawImage(temps[i], 0, 0, temps[i].width, temps[i].height, 0, 0, newW, newH);
-    l.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    l.ctx.lineCap = 'round';
-    l.ctx.lineJoin = 'round';
-  });
-
-  if (layers.length === 0) {
-    addLayer('레이어 1');
-    tryRestoreAutosave();
-  }
-  compositeLayers();
-  applyZoom();
 }
-window.addEventListener('resize', resizeCanvas);
+
+function startNewCanvas(w, h) {
+  clearInterval(airbrushTimer);
+  drawing = false;
+  layers = [];
+  activeLayerIndex = 0;
+  history = [];
+  setupCanvasSize(w, h);
+  addLayer('레이어 1');
+  fitZoomToContainer();
+  document.getElementById('newCanvasMenu').classList.remove('open');
+}
+
+window.addEventListener('resize', () => {
+  if (canvasLogicalW) fitZoomToContainer();
+});
 
 function applyZoom() {
   canvas.style.transform = 'scale(' + zoomLevel + ')';
   document.getElementById('zoomLabel').textContent = Math.round(zoomLevel * 100) + '%';
+}
+
+function fitZoomToContainer() {
+  const rect = wrap.getBoundingClientRect();
+  if (!cssWidth || !cssHeight) return;
+  const fit = Math.min(rect.width / cssWidth, rect.height / cssHeight, 1);
+  zoomLevel = Math.max(0.1, +fit.toFixed(2));
+  applyZoom();
 }
 
 document.getElementById('zoomIn').addEventListener('click', () => {
@@ -501,12 +522,47 @@ document.getElementById('zoomIn').addEventListener('click', () => {
   applyZoom();
 });
 document.getElementById('zoomOut').addEventListener('click', () => {
-  zoomLevel = Math.max(0.5, +(zoomLevel - 0.25).toFixed(2));
+  zoomLevel = Math.max(0.1, +(zoomLevel - 0.25).toFixed(2));
   applyZoom();
 });
-document.getElementById('zoomReset').addEventListener('click', () => {
-  zoomLevel = 1;
-  applyZoom();
+document.getElementById('zoomFit').addEventListener('click', () => {
+  fitZoomToContainer();
+});
+
+// ---------- New-canvas size picker ----------
+
+const newCanvasMenu = document.getElementById('newCanvasMenu');
+
+document.querySelectorAll('#newCanvasMenu .saveOpt[data-w]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    startNewCanvas(parseInt(btn.dataset.w), parseInt(btn.dataset.h));
+  });
+});
+
+document.getElementById('customStartBtn').addEventListener('click', () => {
+  const w = parseInt(document.getElementById('customW').value);
+  const h = parseInt(document.getElementById('customH').value);
+  if (!w || !h || w < 50 || h < 50) {
+    alert('가로/세로 값을 50 이상으로 입력해주세요.');
+    return;
+  }
+  startNewCanvas(Math.min(w, 4000), Math.min(h, 4000));
+});
+
+document.getElementById('continueBtn').addEventListener('click', async () => {
+  cloudStatus.textContent = '불러오는 중...';
+  const gotCloud = await loadFromCloud();
+  if (!gotCloud) continueFromLocal();
+  newCanvasMenu.classList.remove('open');
+});
+
+document.getElementById('closeNewCanvasMenu').addEventListener('click', () => {
+  if (canvasLogicalW) newCanvasMenu.classList.remove('open');
+});
+
+document.getElementById('newCanvasBtn').addEventListener('click', () => {
+  if (canvasLogicalW && !confirm('현재 작업 중인 캔버스를 닫고 새로 시작할까요? (저장된 작업은 그대로 남아있습니다)')) return;
+  newCanvasMenu.classList.add('open');
 });
 
 function saveHistory() {
@@ -714,9 +770,13 @@ function scheduleAutosave() {
 
 function doAutosave() {
   try {
-    const dataUrl = canvas.toDataURL('image/png');
-    memoryDraft = dataUrl;
-    if (storageAvailable) localStorage.setItem('sketchAutosave', dataUrl);
+    const payload = JSON.stringify({
+      dataUrl: canvas.toDataURL('image/png'),
+      width: cssWidth,
+      height: cssHeight
+    });
+    memoryDraft = payload;
+    if (storageAvailable) localStorage.setItem('sketchAutosave', payload);
     const now = new Date();
     const hh = String(now.getHours()).padStart(2, '0');
     const mm = String(now.getMinutes()).padStart(2, '0');
@@ -726,25 +786,44 @@ function doAutosave() {
   }
 }
 
-function tryRestoreAutosave() {
-  let dataUrl = null;
+function continueFromLocal() {
+  let raw = null;
   if (storageAvailable) {
-    try { dataUrl = localStorage.getItem('sketchAutosave'); } catch (e) {}
+    try { raw = localStorage.getItem('sketchAutosave'); } catch (e) {}
   }
-  if (!dataUrl) dataUrl = memoryDraft;
-  if (!dataUrl) return;
+  if (!raw) raw = memoryDraft;
+  if (!raw) {
+    autosaveStatus.textContent = '이전에 저장된 그림이 없습니다';
+    startNewCanvas(1080, 1080);
+    return false;
+  }
+  let parsed;
+  try { parsed = JSON.parse(raw); } catch (e) { parsed = null; }
+  if (!parsed || !parsed.dataUrl || !parsed.width || !parsed.height) {
+    autosaveStatus.textContent = '이전에 저장된 그림이 없습니다';
+    startNewCanvas(1080, 1080);
+    return false;
+  }
+  setupCanvasSize(parsed.width, parsed.height);
+  layers = [];
+  activeLayerIndex = 0;
+  addLayer('레이어 1');
   const img = new Image();
   img.onload = () => {
     ctx.drawImage(img, 0, 0, cssWidth, cssHeight);
     compositeLayers();
-    autosaveStatus.textContent = '이전 그림 복원됨 (평면 이미지, 레이어는 새로 시작)';
+    fitZoomToContainer();
+    autosaveStatus.textContent = '기기에 저장된 그림 복원됨 (평면 이미지)';
   };
-  img.src = dataUrl;
+  img.src = parsed.dataUrl;
+  newCanvasMenu.classList.remove('open');
+  return true;
 }
 
 // ---------- Pointer input (mouse / touch / pen, with pressure) ----------
 
 function startDraw(e) {
+  if (!ctx) return;
   e.preventDefault();
   if (canvas.setPointerCapture && e.pointerId != null) {
     try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
@@ -865,7 +944,7 @@ document.getElementById('eraserBtn').addEventListener('click', (e) => {
 });
 
 document.getElementById('undoBtn').addEventListener('click', () => {
-  if (history.length === 0) return;
+  if (!ctx || history.length === 0) return;
   const imgData = history.pop();
   ctx.putImageData(imgData, 0, 0);
   compositeLayers();
@@ -873,6 +952,7 @@ document.getElementById('undoBtn').addEventListener('click', () => {
 });
 
 document.getElementById('clearBtn').addEventListener('click', () => {
+  if (!ctx) return;
   saveHistory();
   ctx.clearRect(0, 0, cssWidth, cssHeight);
   compositeLayers();
@@ -882,7 +962,7 @@ document.getElementById('clearBtn').addEventListener('click', () => {
 // ---------- Save menu (multiple formats + share) ----------
 
 const saveMenu = document.getElementById('saveMenu');
-document.getElementById('saveBtn').addEventListener('click', () => saveMenu.classList.add('open'));
+document.getElementById('saveBtn').addEventListener('click', () => { if (canvasLogicalW) saveMenu.classList.add('open'); });
 document.getElementById('closeSaveMenu').addEventListener('click', () => saveMenu.classList.remove('open'));
 
 document.querySelectorAll('.saveOpt[data-fmt]').forEach(btn => {
@@ -931,8 +1011,7 @@ document.getElementById('shareOpt').addEventListener('click', async () => {
 });
 
 // ---------- Init ----------
-resizeCanvas();
-loadFromCloud();
+// 캔버스 크기를 고르기 전까지는 #newCanvasMenu가 열린 상태로 시작합니다 (HTML의 class="open").
 </script>
 </body>
 </html>
