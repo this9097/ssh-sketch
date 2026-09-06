@@ -1147,8 +1147,40 @@ function continueFromLocal() {
 
 // ---------- Pointer input (mouse / touch / pen, with pressure) ----------
 
+// ---------- 두 손가락 핀치 확대/축소 ----------
+let activeTouches = new Map();
+let pinching = false;
+let pinchStartDist = 1;
+let pinchStartZoom = 1;
+
 function startDraw(e) {
   if (!ctx) return;
+
+  if (e.pointerType === 'touch') {
+    activeTouches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (activeTouches.size >= 2) {
+      e.preventDefault();
+      if (canvas.setPointerCapture && e.pointerId != null) {
+        try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
+      }
+      if (drawing) {
+        if (history.length) {
+          const snap = history.pop();
+          ctx.putImageData(snap, 0, 0);
+        }
+        drawing = false;
+        if (airbrushTimer) { clearInterval(airbrushTimer); airbrushTimer = null; }
+        compositeLayers();
+      }
+      pinching = true;
+      const pts = Array.from(activeTouches.values());
+      pinchStartDist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y) || 1;
+      pinchStartZoom = zoomLevel;
+      return;
+    }
+  }
+  if (pinching) return;
+
   e.preventDefault();
   if (canvas.setPointerCapture && e.pointerId != null) {
     try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
@@ -1184,6 +1216,22 @@ function startDraw(e) {
 }
 
 function draw(e) {
+  if (e.pointerType === 'touch' && activeTouches.has(e.pointerId)) {
+    activeTouches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  }
+
+  if (pinching) {
+    if (activeTouches.size >= 2) {
+      e.preventDefault();
+      const pts = Array.from(activeTouches.values());
+      const dist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y) || 1;
+      const newZoom = pinchStartZoom * (dist / pinchStartDist);
+      zoomLevel = Math.max(0.1, Math.min(4, +newZoom.toFixed(2)));
+      applyZoom();
+    }
+    return;
+  }
+
   if (!drawing) return;
   e.preventDefault();
   const p2 = getPos(e);
@@ -1229,7 +1277,11 @@ function draw(e) {
   compositeLayers();
 }
 
-function endDraw() {
+function endDraw(e) {
+  if (e && e.pointerType === 'touch') {
+    activeTouches.delete(e.pointerId);
+    if (activeTouches.size < 2) pinching = false;
+  }
   if (airbrushTimer) { clearInterval(airbrushTimer); airbrushTimer = null; }
   if (drawing) scheduleAutosave();
   drawing = false; p0 = p1 = null;
