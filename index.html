@@ -101,6 +101,7 @@
     <button class="zoomBtn" id="zoomIn">＋</button>
     <button class="zoomBtn" id="zoomFit">맞춤</button>
     <button class="zoomBtn" id="layerBtn">레이어</button>
+    <button class="zoomBtn" id="galleryBtn">작품목록</button>
     <button class="zoomBtn" id="resizeCanvasBtn">크기변경</button>
     <button class="zoomBtn" id="newCanvasBtn">새 캔버스</button>
   </div>
@@ -157,8 +158,16 @@
         <input type="number" id="customH" placeholder="세로(px)" style="width:45%; padding:8px; border-radius:8px; border:none; background:#3a3a3c; color:#fff;">
       </div>
       <button class="saveOpt" id="customStartBtn">직접 입력한 크기로 시작</button>
-      <button class="saveOpt" id="continueBtn">이어서 그리기 (이전 작업 불러오기)</button>
+      <button class="saveOpt" id="continueBtn">마지막 작업 이어서 열기</button>
       <button class="sheetClose" id="closeNewCanvasMenu">취소</button>
+    </div>
+  </div>
+
+  <div id="galleryMenu" class="sheetOverlay">
+    <div class="sheetCard">
+      <h3>작품 목록 (그리는 중에도 다른 작품으로 바꿀 수 있습니다)</h3>
+      <div id="galleryList" style="max-height:50vh; overflow-y:auto;"></div>
+      <button class="sheetClose" id="closeGalleryMenu">닫기</button>
     </div>
   </div>
 
@@ -196,14 +205,14 @@ const firebaseConfig = {
 };
 
 let db = null;
-let docRef = null;
+let currentDocId = null;
+let currentTitle = '이름없는 작품';
 let cloudTimer = null;
 
 try {
   if (typeof firebase !== 'undefined') {
     firebase.initializeApp(firebaseConfig);
     db = firebase.firestore();
-    docRef = db.collection('sketches').doc('current');
   }
 } catch (e) {
   db = null;
@@ -221,17 +230,23 @@ function layerThumbDataURL(layer, maxDim) {
 }
 
 function scheduleCloudSave() {
-  if (!docRef) return;
+  if (!db) return;
   clearTimeout(cloudTimer);
   cloudTimer = setTimeout(saveToCloud, 1500);
 }
 
 async function saveToCloud() {
-  if (!docRef) return;
+  if (!db) return;
+  if (!currentDocId) {
+    currentDocId = 'sketch_' + Date.now();
+    try { localStorage.setItem('sketchLastDocId', currentDocId); } catch (e) {}
+  }
   try {
     cloudStatus.textContent = '저장 중...';
     const payload = {
+      title: currentTitle,
       updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+      updatedAtMs: Date.now(),
       width: cssWidth,
       height: cssHeight,
       layers: layers.map(l => ({
@@ -242,7 +257,7 @@ async function saveToCloud() {
         dataUrl: layerThumbDataURL(l, 1400)
       }))
     };
-    await docRef.set(payload);
+    await db.collection('sketches').doc(currentDocId).set(payload);
     const now = new Date();
     const hh = String(now.getHours()).padStart(2, '0');
     const mm = String(now.getMinutes()).padStart(2, '0');
@@ -252,14 +267,18 @@ async function saveToCloud() {
   }
 }
 
-async function loadFromCloud() {
-  if (!docRef) return false;
+async function openWork(id) {
+  if (!db) return false;
   try {
     cloudStatus.textContent = '불러오는 중...';
-    const snap = await docRef.get();
-    if (!snap.exists) { cloudStatus.textContent = '저장된 작업 없음'; return false; }
+    const snap = await db.collection('sketches').doc(id).get();
+    if (!snap.exists) { cloudStatus.textContent = '작품을 찾을 수 없음'; return false; }
     const data = snap.data();
-    if (!data.layers || !data.layers.length) { cloudStatus.textContent = '저장된 작업 없음'; return false; }
+    if (!data.layers || !data.layers.length) { cloudStatus.textContent = '빈 작품입니다'; return false; }
+
+    currentDocId = id;
+    currentTitle = data.title || '이름없는 작품';
+    try { localStorage.setItem('sketchLastDocId', id); } catch (e) {}
 
     setupCanvasSize(data.width || 1080, data.height || 1080);
     layers = [];
@@ -289,12 +308,28 @@ async function loadFromCloud() {
     renderLayerPanel();
     compositeLayers();
     fitZoomToContainer();
-    cloudStatus.textContent = '클라우드에서 불러옴';
+    cloudStatus.textContent = '"' + currentTitle + '" 불러옴';
     return true;
   } catch (e) {
     cloudStatus.textContent = '클라우드 불러오기 실패';
     return false;
   }
+}
+
+async function loadFromCloud() {
+  let lastId = null;
+  try { lastId = localStorage.getItem('sketchLastDocId'); } catch (e) {}
+  if (!lastId) { cloudStatus.textContent = '저장된 작업 없음'; return false; }
+  return await openWork(lastId);
+}
+
+async function fetchGalleryList() {
+  if (!db) return [];
+  const snap = await db.collection('sketches').get();
+  const docs = [];
+  snap.forEach(doc => docs.push({ id: doc.id, data: doc.data() }));
+  docs.sort((a, b) => (b.data.updatedAtMs || 0) - (a.data.updatedAtMs || 0));
+  return docs;
 }
 
 let ctx = null; // always points to the ACTIVE layer's 2D context
@@ -490,6 +525,12 @@ function setupCanvasSize(w, h) {
 }
 
 function startNewCanvas(w, h) {
+  const typed = prompt('작품 이름을 입력해주세요', '이름없는 작품');
+  const title = (typed || '').trim() || '이름없는 작품';
+  currentDocId = 'sketch_' + Date.now();
+  currentTitle = title;
+  try { localStorage.setItem('sketchLastDocId', currentDocId); } catch (e) {}
+
   clearInterval(airbrushTimer);
   drawing = false;
   layers = [];
@@ -499,6 +540,7 @@ function startNewCanvas(w, h) {
   addLayer('레이어 1');
   fitZoomToContainer();
   document.getElementById('newCanvasMenu').classList.remove('open');
+  scheduleAutosave();
 }
 
 function resizeExistingCanvas(w, h) {
@@ -608,6 +650,56 @@ document.getElementById('newCanvasBtn').addEventListener('click', () => {
 document.getElementById('resizeCanvasBtn').addEventListener('click', () => {
   openSizePicker(true);
 });
+
+// ---------- Gallery (switch between saved works, even mid-drawing) ----------
+
+const galleryMenu = document.getElementById('galleryMenu');
+
+async function renderGallery() {
+  const list = document.getElementById('galleryList');
+  list.innerHTML = '불러오는 중...';
+  if (!db) { list.innerHTML = '클라우드 연결이 안 되어 목록을 볼 수 없습니다.'; return; }
+  try {
+    const docs = await fetchGalleryList();
+    if (!docs.length) { list.innerHTML = '저장된 작품이 아직 없습니다.'; return; }
+    list.innerHTML = '';
+    docs.forEach(d => {
+      const row = document.createElement('div');
+      row.className = 'layerRow' + (d.id === currentDocId ? ' active' : '');
+      const label = (d.data.title || '이름없는 작품') + (d.id === currentDocId ? ' (현재)' : '');
+      row.innerHTML =
+        '<span class="layerName">' + label + '</span>' +
+        '<button class="upBtn" data-open="' + d.id + '" style="width:auto; padding:0 8px;">열기</button>' +
+        '<button class="downBtn" data-del="' + d.id + '" style="width:auto; padding:0 8px; background:#5a1e1e;">삭제</button>';
+      list.appendChild(row);
+    });
+    list.querySelectorAll('[data-open]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const targetId = btn.dataset.open;
+        if (targetId === currentDocId) { galleryMenu.classList.remove('open'); return; }
+        if (currentDocId) await saveToCloud(); // 지금 작업 먼저 저장하고 전환
+        galleryMenu.classList.remove('open');
+        await openWork(targetId);
+      });
+    });
+    list.querySelectorAll('[data-del]').forEach(btn => {
+      btn.addEventListener('click', async (ev) => {
+        ev.stopPropagation();
+        if (!confirm('이 작품을 삭제할까요? 되돌릴 수 없습니다.')) return;
+        await db.collection('sketches').doc(btn.dataset.del).delete();
+        renderGallery();
+      });
+    });
+  } catch (e) {
+    list.innerHTML = '목록을 불러오지 못했습니다.';
+  }
+}
+
+document.getElementById('galleryBtn').addEventListener('click', () => {
+  galleryMenu.classList.add('open');
+  renderGallery();
+});
+document.getElementById('closeGalleryMenu').addEventListener('click', () => galleryMenu.classList.remove('open'));
 
 function saveHistory() {
   history.push(ctx.getImageData(0, 0, canvas.width, canvas.height));
