@@ -1073,7 +1073,7 @@ document.getElementById('loadPhotoColoringBtn').addEventListener('click', () => 
   document.getElementById('photoInput').click();
 });
 
-// 사진의 밝기 변화(가장자리)만 뽑아내 선으로 남기고 나머지는 흰색으로 만드는 간단한 소벨(Sobel) 엣지 검출.
+// 사진의 밝기 변화(가장자리)만 뽑아내 선으로 남기고 나머지는 흰색으로 만드는 엣지 검출.
 // 원본 해상도 그대로 처리하면 느려질 수 있어 처리용으로 축소했다가, 결과만 레이어 크기에 맞춰 다시 그린다.
 function boxBlurGray(src, w, h) {
   const out = new Float32Array(w * h);
@@ -1099,21 +1099,27 @@ function smoothstep(a, b, x) {
   return t * t * (3 - 2 * t);
 }
 
-// 그레이디언트 크기 분포에서 상위 percentile(예: 0.90 = 상위 10%)에 해당하는 값을
-// 임계값으로 잡는다. 사진마다 밝기/대비가 다 달라서 고정된 숫자를 임계값으로 쓰면
+// 그레이디언트 크기 분포에서 상위 percentile(예: 0.94 = 상위 6%)에 해당하는 값을
+// 임계값으로 잡는다. 사진마다 밝기/대비가 다 달라서 고정된 임계값을 쓰면
 // 어떤 사진은 선이 하나도 안 남고, 어떤 사진은 온통 선 범벅이 된다 — 사진마다
-// 자동으로 맞춰지도록 히스토그램에서 직접 계산한다.
+// 자동으로 맞춰지도록 히스토그램에서 직접 계산한다. mag가 0인(비최대) 픽셀은
+// 이미 얇게 걸러진 상태라 통계에서 제외해야 임계값이 왜곡되지 않는다.
 function computeAdaptiveThreshold(mags, percentile) {
   let maxMag = 0;
-  for (let i = 0; i < mags.length; i++) if (mags[i] > maxMag) maxMag = mags[i];
-  if (maxMag < 1) return 1;
+  let nonZeroCount = 0;
+  for (let i = 0; i < mags.length; i++) {
+    if (mags[i] > maxMag) maxMag = mags[i];
+    if (mags[i] > 0) nonZeroCount++;
+  }
+  if (maxMag < 1 || nonZeroCount === 0) return 1;
   const buckets = 512;
   const hist = new Uint32Array(buckets);
   for (let i = 0; i < mags.length; i++) {
+    if (mags[i] <= 0) continue;
     const b = Math.min(buckets - 1, Math.floor((mags[i] / maxMag) * (buckets - 1)));
     hist[b]++;
   }
-  const targetCount = mags.length * (1 - percentile);
+  const targetCount = nonZeroCount * (1 - percentile);
   let cum = 0;
   for (let b = buckets - 1; b >= 0; b--) {
     cum += hist[b];
@@ -1122,9 +1128,69 @@ function computeAdaptiveThreshold(mags, percentile) {
   return maxMag * 0.3;
 }
 
-// 사진 → 색칠용 밑그림. 고정된 임계값 숫자를 쓰면 사진마다 밝기/대비가 달라
-// 어떤 사진은 선이 거의 안 남고 어떤 사진은 지저분해졌다. 이제는 각 사진의
-// 실제 경계 강도 분포를 분석해서 임계값을 그때그때 자동으로 계산한다.
+// 그레이디언트 방향으로 이웃 두 픽셀과 비교해서, 그 방향으로 가장 강한(국소 최대) 픽셀만
+// 남기고 나머지는 0으로 지운다 — 캐니(Canny) 엣지 검출의 핵심 아이디어로, 두꺼운 얼룩
+// 대신 한 두 픽셀 굵기의 가느다란 선을 직접 얻을 수 있다.
+function nonMaxSuppress(gx, gy, mag, w, h) {
+  const out = new Float32Array(w * h);
+  for (let y = 1; y < h - 1; y++) {
+    for (let x = 1; x < w - 1; x++) {
+      const idx = y * w + x;
+      let angle = Math.atan2(gy[idx], gx[idx]) * 180 / Math.PI;
+      if (angle < 0) angle += 180;
+      let n1, n2;
+      if (angle < 22.5 || angle >= 157.5) { n1 = mag[idx - 1]; n2 = mag[idx + 1]; }
+      else if (angle < 67.5) { n1 = mag[(y - 1) * w + x + 1]; n2 = mag[(y + 1) * w + x - 1]; }
+      else if (angle < 112.5) { n1 = mag[(y - 1) * w + x]; n2 = mag[(y + 1) * w + x]; }
+      else { n1 = mag[(y - 1) * w + x - 1]; n2 = mag[(y + 1) * w + x + 1]; }
+      out[idx] = (mag[idx] >= n1 && mag[idx] >= n2) ? mag[idx] : 0;
+    }
+  }
+  return out;
+}
+
+// JPEG 노이즈나 잔 텍스처 때문에 생기는 외딴 잡점(작은 덩어리)을 지운다.
+// 서로 붙어있는 검은 픽셀 덩어리(연결요소)의 크기를 세어, minSize보다 작으면 지운다.
+function removeSpeckles(isBlack, w, h, minSize) {
+  const visited = new Uint8Array(w * h);
+  const stack = [];
+  for (let start = 0; start < w * h; start++) {
+    if (!isBlack[start] || visited[start]) continue;
+    const component = [start];
+    visited[start] = 1;
+    stack.length = 0;
+    stack.push(start);
+    while (stack.length) {
+      const cur = stack.pop();
+      const cx = cur % w, cy = (cur / w) | 0;
+      const neighbors = [
+        cx > 0 ? cur - 1 : -1,
+        cx < w - 1 ? cur + 1 : -1,
+        cy > 0 ? cur - w : -1,
+        cy < h - 1 ? cur + w : -1
+      ];
+      for (const n of neighbors) {
+        if (n >= 0 && isBlack[n] && !visited[n]) {
+          visited[n] = 1;
+          component.push(n);
+          stack.push(n);
+        }
+      }
+      if (component.length > minSize) break; // 충분히 크면 더 안 세도 됨 (성능)
+    }
+    if (component.length <= minSize) {
+      for (const idx of component) isBlack[idx] = 0;
+    }
+  }
+  return isBlack;
+}
+
+// 사진 → 색칠용 밑그림.
+// 1) 강하게 흐림 처리해서 잔 텍스처/노이즈를 억제하고 큰 윤곽만 남긴다
+// 2) 소벨로 경계 강도·방향을 구한다
+// 3) 그 방향으로 국소 최대만 남겨(비최대 억제) 두꺼운 얼룩이 아니라 가는 선을 얻는다
+// 4) 사진마다 경계 강도 분포를 분석해 임계값을 자동으로 정한다
+// 5) 남은 자잘한 잡점(노이즈)을 지운다
 function photoToLineArtCanvas(img, edgePercentile) {
   const procW = Math.min(1400, img.width);
   const scale = procW / img.width;
@@ -1142,34 +1208,48 @@ function photoToLineArtCanvas(img, edgePercentile) {
   for (let i = 0, p = 0; i < data.length; i += 4, p++) {
     gray[p] = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
   }
-  gray = boxBlurGray(gray, procW, procH); // 잡티 억제용 약한 블러 1회만
+  // 텍스처가 많은(복잡한) 사진에서 자잘한 얼룩이 잔뜩 나오지 않도록 세 번 흐림 처리 (약한 가우시안 흐림 효과)
+  gray = boxBlurGray(gray, procW, procH);
+  gray = boxBlurGray(gray, procW, procH);
+  gray = boxBlurGray(gray, procW, procH);
 
   const gxK = [-1, 0, 1, -2, 0, 2, -1, 0, 1];
   const gyK = [-1, -2, -1, 0, 0, 0, 1, 2, 1];
-  const mags = new Float32Array(procW * procH);
+  const gx = new Float32Array(procW * procH);
+  const gy = new Float32Array(procW * procH);
+  const mag = new Float32Array(procW * procH);
 
   for (let y = 0; y < procH; y++) {
     for (let x = 0; x < procW; x++) {
-      let gx = 0, gy = 0, k = 0;
+      let sx = 0, sy = 0, k = 0;
       for (let ky = -1; ky <= 1; ky++) {
         for (let kx = -1; kx <= 1; kx++, k++) {
           const px = Math.min(procW - 1, Math.max(0, x + kx));
           const py = Math.min(procH - 1, Math.max(0, y + ky));
           const val = gray[py * procW + px];
-          gx += val * gxK[k];
-          gy += val * gyK[k];
+          sx += val * gxK[k];
+          sy += val * gyK[k];
         }
       }
-      mags[y * procW + x] = Math.sqrt(gx * gx + gy * gy);
+      const idx = y * procW + x;
+      gx[idx] = sx; gy[idx] = sy;
+      mag[idx] = Math.sqrt(sx * sx + sy * sy);
     }
   }
 
-  const threshold = computeAdaptiveThreshold(mags, edgePercentile);
-  const band = Math.max(3, threshold * 0.2); // 살짝만 완만하게(안티앨리어싱), 너무 두껍지 않게
+  const thin = nonMaxSuppress(gx, gy, mag, procW, procH);
+  const threshold = computeAdaptiveThreshold(thin, edgePercentile);
+  const band = Math.max(2, threshold * 0.15);
+
+  const isBlack = new Uint8Array(procW * procH);
+  for (let i = 0; i < thin.length; i++) {
+    isBlack[i] = smoothstep(threshold - band, threshold + band, thin[i]) > 0.5 ? 1 : 0;
+  }
+  removeSpeckles(isBlack, procW, procH, 4);
+
   const out = new Uint8ClampedArray(procW * procH * 4);
-  for (let i = 0; i < mags.length; i++) {
-    const edgeAmount = smoothstep(threshold - band, threshold + band, mags[i]);
-    const v = Math.round(255 * (1 - edgeAmount));
+  for (let i = 0; i < isBlack.length; i++) {
+    const v = isBlack[i] ? 0 : 255;
     const idx = i * 4;
     out[idx] = v; out[idx + 1] = v; out[idx + 2] = v; out[idx + 3] = 255;
   }
@@ -1208,7 +1288,7 @@ document.getElementById('photoInput').addEventListener('change', (e) => {
 
         if (mode === 'coloring') {
           autosaveStatus.textContent = '윤곽선 만드는 중...';
-          const lineArt = photoToLineArtCanvas(img, 0.90);
+          const lineArt = photoToLineArtCanvas(img, 0.94);
           refLayer.ctx.fillStyle = '#ffffff';
           refLayer.ctx.fillRect(0, 0, cw, ch);
           refLayer.ctx.drawImage(lineArt, dx, dy, dw, dh);
