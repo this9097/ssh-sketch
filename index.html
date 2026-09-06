@@ -182,7 +182,7 @@
     <button class="zoomBtn" id="layerBtn">레이어</button>
     <button class="zoomBtn" id="galleryBtn">작품목록</button>
     <button class="zoomBtn" id="referenceBtn">참고그림</button>
-    <button class="zoomBtn" id="removeReferenceBtn">밑그림 지우기</button>
+    <button class="zoomBtn" id="removeReferenceBtn">밑그림 없음</button>
     <button class="zoomBtn" id="resizeCanvasBtn">크기변경</button>
     <button class="zoomBtn" id="newCanvasBtn">새 캔버스</button>
   </div>
@@ -641,6 +641,7 @@ function bindLayerRowEvents() {
       layers[i].visible = !layers[i].visible;
       renderLayerPanel();
       compositeLayers();
+      updateReferenceToggleLabel();
     });
   });
   document.querySelectorAll('.opacityRange').forEach(el => {
@@ -704,6 +705,7 @@ document.getElementById('delLayerBtn').addEventListener('click', () => {
   renderLayerPanel();
   compositeLayers();
   scheduleAutosave();
+  updateReferenceToggleLabel();
 });
 
 // ---------- Canvas / display sizing (HiDPI, fixed logical size chosen up front) ----------
@@ -1053,6 +1055,7 @@ function insertTemplateLayer(key) {
   renderLayerPanel();
   compositeLayers();
   scheduleAutosave();
+  updateReferenceToggleLabel();
   templateMenu.classList.remove('open');
 }
 
@@ -1223,6 +1226,7 @@ document.getElementById('photoInput').addEventListener('change', (e) => {
         renderLayerPanel();
         compositeLayers();
         scheduleAutosave();
+        updateReferenceToggleLabel();
         templateMenu.classList.remove('open');
       } catch (err) {
         alert('사진을 불러오는 중 오류가 발생했습니다. 캔버스 크기가 너무 크지 않은지 확인해주세요.');
@@ -1234,31 +1238,30 @@ document.getElementById('photoInput').addEventListener('change', (e) => {
   e.target.value = '';
 });
 
-// 색칠/따라그리기가 끝난 뒤 밑그림(참고 레이어)만 골라서 지우는 기능.
-// 레이어 패널에서 직접 찾아 지울 수도 있지만, 색칠 마무리 시 자주 쓰는 동작이라 버튼으로 바로 제공.
-document.getElementById('removeReferenceBtn').addEventListener('click', () => {
-  const refIndices = [];
-  layers.forEach((l, i) => { if (l.isReference) refIndices.push(i); });
-  if (refIndices.length === 0) {
-    alert('지울 밑그림(참고 레이어)이 없습니다.');
+// 색칠/따라그리기용 밑그림(참고 레이어)을 완전히 지우지 않고 숨겼다/다시 보이게 할 수 있도록 토글.
+function updateReferenceToggleLabel() {
+  const btn = document.getElementById('removeReferenceBtn');
+  const refLayers = layers.filter((l) => l.isReference);
+  if (refLayers.length === 0) {
+    btn.textContent = '밑그림 없음';
     return;
   }
-  if (!confirm('밑그림 레이어를 삭제할까요? 색칠/그린 그림은 그대로 남습니다.')) return;
+  const anyVisible = refLayers.some((l) => l.visible);
+  btn.textContent = anyVisible ? '밑그림 숨기기' : '밑그림 보이기';
+}
 
-  refIndices.sort((a, b) => b - a).forEach((i) => { layers.splice(i, 1); });
-
-  if (layers.length === 0) {
-    addLayer('레이어 1');
-  } else {
-    activeLayerIndex = Math.max(0, Math.min(activeLayerIndex, layers.length - 1));
-    ctx = layers[activeLayerIndex].ctx;
+document.getElementById('removeReferenceBtn').addEventListener('click', () => {
+  const refLayers = layers.filter((l) => l.isReference);
+  if (refLayers.length === 0) {
+    alert('밑그림(참고 레이어)이 없습니다. "참고그림" 버튼으로 먼저 추가해주세요.');
+    return;
   }
-  history = [];
-  redoStack = [];
-  updateUndoRedoButtons();
+  const anyVisible = refLayers.some((l) => l.visible);
+  refLayers.forEach((l) => { l.visible = !anyVisible; });
   renderLayerPanel();
   compositeLayers();
   scheduleAutosave();
+  updateReferenceToggleLabel();
 });
 
 function saveHistory() {
