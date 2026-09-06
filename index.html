@@ -39,12 +39,23 @@
   #colorPickerWrap {
     width: 28px; height: 28px; border-radius: 50%; flex-shrink: 0;
     background: conic-gradient(red, yellow, lime, cyan, blue, magenta, red);
-    display: block; overflow: hidden; border: 2px solid rgba(255,255,255,0.6);
-    cursor: pointer;
+    border: 2px solid rgba(255,255,255,0.6);
+    cursor: pointer; padding: 0;
   }
-  #colorPicker {
-    width: 100%; height: 100%; padding: 0; border: none; background: none;
-    opacity: 0; cursor: pointer;
+  #svCanvas { width: 100%; height: 160px; border-radius: 8px; touch-action: none; display: block; }
+  #hueSlider {
+    width: 100%; margin: 12px 0; height: 18px; border-radius: 9px;
+    background: linear-gradient(to right, red, yellow, lime, cyan, blue, magenta, red);
+    -webkit-appearance: none; appearance: none;
+  }
+  #hueSlider::-webkit-slider-thumb {
+    -webkit-appearance: none; width: 22px; height: 22px; border-radius: 50%;
+    background: #fff; border: 2px solid #1c1c1e; cursor: pointer;
+  }
+  #colorPreview { width: 36px; height: 36px; border-radius: 50%; border: 2px solid #fff; flex-shrink: 0; }
+  #hexInput {
+    flex: 1; padding: 8px; border-radius: 8px; border: none; background: #3a3a3c; color: #fff;
+    font-size: 14px;
   }
   .toolBtn, .brushBtn, .zoomBtn {
     background: #3a3a3c; color: #fff; border: none; border-radius: 10px;
@@ -151,9 +162,7 @@
     <button class="brushBtn" data-brush="fill">채우기</button>
   </div>
   <div id="toolbar">
-    <label id="colorPickerWrap" title="색상 직접 선택 (전체 색상)">
-      <input type="color" id="colorPicker" value="#000000">
-    </label>
+    <button id="colorPickerWrap" title="세부 색상 선택 (전체 색상)"></button>
     <div class="colorDot active" style="background:#000000" data-color="#000000"></div>
     <div class="colorDot" style="background:#ff3b30" data-color="#ff3b30"></div>
     <div class="colorDot" style="background:#ff9500" data-color="#ff9500"></div>
@@ -179,6 +188,20 @@
       <button class="saveOpt" id="pdfOpt">PDF로 저장<small>문서/인쇄용</small></button>
       <button class="saveOpt" id="shareOpt">공유하기<small>카톡 등으로 바로 보내기</small></button>
       <button class="sheetClose" id="closeSaveMenu">닫기</button>
+    </div>
+  </div>
+
+  <div id="colorPickerMenu" class="sheetOverlay">
+    <div class="sheetCard">
+      <h3>색상 선택</h3>
+      <canvas id="svCanvas" width="240" height="160"></canvas>
+      <input type="range" id="hueSlider" min="0" max="360" value="0">
+      <div style="display:flex; align-items:center; gap:10px; margin-bottom:10px;">
+        <div id="colorPreview"></div>
+        <input type="text" id="hexInput" placeholder="#000000">
+      </div>
+      <button class="saveOpt" id="applyColorBtn">이 색상 사용하기</button>
+      <button class="sheetClose" id="closeColorPickerMenu">닫기</button>
     </div>
   </div>
 
@@ -646,21 +669,42 @@ function applyZoom() {
   document.getElementById('zoomLabel').textContent = Math.round(zoomLevel * 100) + '%';
 }
 
+// 확대/축소를 특정 화면 지점(핀치 중심점 등)을 기준으로 실행 — 그 지점이 화면상 같은 자리에 그대로 남도록 스크롤도 함께 보정
+function zoomAroundPoint(newZoom, clientX, clientY) {
+  const wrapRect = wrap.getBoundingClientRect();
+  const beforeContentX = wrap.scrollLeft + (clientX - wrapRect.left);
+  const beforeContentY = wrap.scrollTop + (clientY - wrapRect.top);
+  const unscaledX = beforeContentX / zoomLevel;
+  const unscaledY = beforeContentY / zoomLevel;
+
+  zoomLevel = newZoom;
+  applyZoom();
+
+  const afterContentX = unscaledX * zoomLevel;
+  const afterContentY = unscaledY * zoomLevel;
+  wrap.scrollLeft = afterContentX - (clientX - wrapRect.left);
+  wrap.scrollTop = afterContentY - (clientY - wrapRect.top);
+}
+
 function fitZoomToContainer() {
   const rect = wrap.getBoundingClientRect();
   if (!cssWidth || !cssHeight) return;
   const fit = Math.min(rect.width / cssWidth, rect.height / cssHeight, 1);
   zoomLevel = Math.max(0.1, +fit.toFixed(2));
   applyZoom();
+  wrap.scrollLeft = 0;
+  wrap.scrollTop = 0;
 }
 
 document.getElementById('zoomIn').addEventListener('click', () => {
-  zoomLevel = Math.min(4, +(zoomLevel + 0.25).toFixed(2));
-  applyZoom();
+  const newZoom = Math.min(4, +(zoomLevel + 0.25).toFixed(2));
+  const rect = wrap.getBoundingClientRect();
+  zoomAroundPoint(newZoom, rect.left + rect.width / 2, rect.top + rect.height / 2);
 });
 document.getElementById('zoomOut').addEventListener('click', () => {
-  zoomLevel = Math.max(0.1, +(zoomLevel - 0.25).toFixed(2));
-  applyZoom();
+  const newZoom = Math.max(0.1, +(zoomLevel - 0.25).toFixed(2));
+  const rect = wrap.getBoundingClientRect();
+  zoomAroundPoint(newZoom, rect.left + rect.width / 2, rect.top + rect.height / 2);
 });
 document.getElementById('zoomFit').addEventListener('click', () => {
   fitZoomToContainer();
@@ -1282,9 +1326,10 @@ function draw(e) {
       e.preventDefault();
       const pts = Array.from(activeTouches.values());
       const dist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y) || 1;
-      const newZoom = pinchStartZoom * (dist / pinchStartDist);
-      zoomLevel = Math.max(0.1, Math.min(4, +newZoom.toFixed(2)));
-      applyZoom();
+      const midX = (pts[0].x + pts[1].x) / 2;
+      const midY = (pts[0].y + pts[1].y) / 2;
+      const newZoom = Math.max(0.1, Math.min(4, +(pinchStartZoom * (dist / pinchStartDist)).toFixed(2)));
+      zoomAroundPoint(newZoom, midX, midY);
     }
     return;
   }
@@ -1357,15 +1402,148 @@ document.querySelectorAll('.colorDot').forEach(dot => {
     currentColor = dot.dataset.color;
     isEraser = false;
     document.getElementById('eraserBtn').classList.remove('active');
-    document.getElementById('colorPicker').value = currentColor;
   });
 });
 
-document.getElementById('colorPicker').addEventListener('input', (e) => {
-  currentColor = e.target.value;
+// ---------- 세부 색상 선택기 (SV 사각형 + 색조 슬라이더 + HEX 입력) ----------
+
+let pickerHue = 0, pickerSat = 0, pickerVal = 0;
+const svCanvas = document.getElementById('svCanvas');
+const svCtx = svCanvas.getContext('2d');
+
+function hsvToRgb(h, s, v) {
+  const c = v * s;
+  const x = c * (1 - Math.abs((h / 60) % 2 - 1));
+  const m = v - c;
+  let r = 0, g = 0, b = 0;
+  if (h < 60) { r = c; g = x; b = 0; }
+  else if (h < 120) { r = x; g = c; b = 0; }
+  else if (h < 180) { r = 0; g = c; b = x; }
+  else if (h < 240) { r = 0; g = x; b = c; }
+  else if (h < 300) { r = x; g = 0; b = c; }
+  else { r = c; g = 0; b = x; }
+  return { r: Math.round((r + m) * 255), g: Math.round((g + m) * 255), b: Math.round((b + m) * 255) };
+}
+
+function rgbToHex(r, g, b) {
+  return '#' + [r, g, b].map(v => v.toString(16).padStart(2, '0')).join('');
+}
+
+function rgbToHsv(r, g, b) {
+  r /= 255; g /= 255; b /= 255;
+  const max = Math.max(r, g, b), min = Math.min(r, g, b), d = max - min;
+  let h = 0;
+  if (d !== 0) {
+    if (max === r) h = 60 * (((g - b) / d) % 6);
+    else if (max === g) h = 60 * ((b - r) / d + 2);
+    else h = 60 * ((r - g) / d + 4);
+  }
+  if (h < 0) h += 360;
+  const s = max === 0 ? 0 : d / max;
+  const v = max;
+  return { h, s, v };
+}
+
+function renderSVCanvas() {
+  const w = svCanvas.width, h = svCanvas.height;
+  const hueRgb = hsvToRgb(pickerHue, 1, 1);
+  const satGrad = svCtx.createLinearGradient(0, 0, w, 0);
+  satGrad.addColorStop(0, '#ffffff');
+  satGrad.addColorStop(1, 'rgb(' + hueRgb.r + ',' + hueRgb.g + ',' + hueRgb.b + ')');
+  svCtx.fillStyle = satGrad;
+  svCtx.fillRect(0, 0, w, h);
+  const valGrad = svCtx.createLinearGradient(0, 0, 0, h);
+  valGrad.addColorStop(0, 'rgba(0,0,0,0)');
+  valGrad.addColorStop(1, 'rgba(0,0,0,1)');
+  svCtx.fillStyle = valGrad;
+  svCtx.fillRect(0, 0, w, h);
+  const cx = pickerSat * w;
+  const cy = (1 - pickerVal) * h;
+  svCtx.strokeStyle = '#fff';
+  svCtx.lineWidth = 2;
+  svCtx.beginPath();
+  svCtx.arc(cx, cy, 7, 0, Math.PI * 2);
+  svCtx.stroke();
+  svCtx.strokeStyle = 'rgba(0,0,0,0.5)';
+  svCtx.lineWidth = 1;
+  svCtx.beginPath();
+  svCtx.arc(cx, cy, 8, 0, Math.PI * 2);
+  svCtx.stroke();
+}
+
+function updatePreviewFromPicker() {
+  const rgb = hsvToRgb(pickerHue, pickerSat, pickerVal);
+  const hex = rgbToHex(rgb.r, rgb.g, rgb.b);
+  document.getElementById('colorPreview').style.background = hex;
+  document.getElementById('hexInput').value = hex;
+  return hex;
+}
+
+function svPointFromEvent(e) {
+  const rect = svCanvas.getBoundingClientRect();
+  let x = (e.clientX - rect.left) / rect.width;
+  let y = (e.clientY - rect.top) / rect.height;
+  x = Math.max(0, Math.min(1, x));
+  y = Math.max(0, Math.min(1, y));
+  return { x, y };
+}
+
+let svDragging = false;
+svCanvas.addEventListener('pointerdown', (e) => {
+  svDragging = true;
+  const p = svPointFromEvent(e);
+  pickerSat = p.x; pickerVal = 1 - p.y;
+  renderSVCanvas();
+  updatePreviewFromPicker();
+});
+svCanvas.addEventListener('pointermove', (e) => {
+  if (!svDragging) return;
+  const p = svPointFromEvent(e);
+  pickerSat = p.x; pickerVal = 1 - p.y;
+  renderSVCanvas();
+  updatePreviewFromPicker();
+});
+window.addEventListener('pointerup', () => { svDragging = false; });
+
+document.getElementById('hueSlider').addEventListener('input', (e) => {
+  pickerHue = parseInt(e.target.value);
+  renderSVCanvas();
+  updatePreviewFromPicker();
+});
+
+document.getElementById('hexInput').addEventListener('change', (e) => {
+  let hex = e.target.value.trim();
+  if (hex && hex[0] !== '#') hex = '#' + hex;
+  if (!/^#[0-9a-fA-F]{6}$/.test(hex)) return;
+  const rgb = hexToRgb(hex);
+  const hsv = rgbToHsv(rgb.r, rgb.g, rgb.b);
+  pickerHue = hsv.h; pickerSat = hsv.s; pickerVal = hsv.v;
+  document.getElementById('hueSlider').value = Math.round(pickerHue);
+  renderSVCanvas();
+  updatePreviewFromPicker();
+});
+
+document.getElementById('colorPickerWrap').addEventListener('click', () => {
+  const rgb = hexToRgb(currentColor);
+  const hsv = rgbToHsv(rgb.r, rgb.g, rgb.b);
+  pickerHue = hsv.h; pickerSat = hsv.s; pickerVal = hsv.v || 1;
+  document.getElementById('hueSlider').value = Math.round(pickerHue);
+  renderSVCanvas();
+  updatePreviewFromPicker();
+  document.getElementById('colorPickerMenu').classList.add('open');
+});
+
+document.getElementById('closeColorPickerMenu').addEventListener('click', () => {
+  document.getElementById('colorPickerMenu').classList.remove('open');
+});
+
+document.getElementById('applyColorBtn').addEventListener('click', () => {
+  const hex = updatePreviewFromPicker();
+  currentColor = hex;
   isEraser = false;
   document.getElementById('eraserBtn').classList.remove('active');
   document.querySelectorAll('.colorDot').forEach(d => d.classList.remove('active'));
+  document.getElementById('colorPickerMenu').classList.remove('open');
 });
 
 document.querySelectorAll('.brushBtn').forEach(btn => {
