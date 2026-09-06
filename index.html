@@ -5,6 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <meta name="google" content="notranslate">
 <title>스케치</title>
+<script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
 <style>
   html, body {
     margin: 0; padding: 0; height: 100%; overflow: hidden;
@@ -91,7 +93,7 @@
     <canvas id="canvas"></canvas>
   </div>
 
-  <div id="autosaveNote">자동 저장: <span id="autosaveStatus">대기 중</span></div>
+  <div id="autosaveNote">기기 저장: <span id="autosaveStatus">대기 중</span> ・ 클라우드: <span id="cloudStatus">대기 중</span></div>
 
   <div id="zoomRow">
     <button class="zoomBtn" id="zoomOut">－</button>
@@ -159,6 +161,117 @@ const canvas = document.getElementById('canvas');
 const dctx = canvas.getContext('2d'); // display/compositing context only
 const wrap = document.getElementById('canvasWrap');
 const autosaveStatus = document.getElementById('autosaveStatus');
+const cloudStatus = document.getElementById('cloudStatus');
+
+// ---------- Firebase (레이어 구조 클라우드 저장) ----------
+
+const firebaseConfig = {
+  apiKey: "AIzaSyCH642xrwFpiA1IUumcBl0BgyqFfObTvPs",
+  authDomain: "ssh-sketch.firebaseapp.com",
+  projectId: "ssh-sketch",
+  storageBucket: "ssh-sketch.firebasestorage.app",
+  messagingSenderId: "162374226266",
+  appId: "1:162374226266:web:a663cc5971e5261544e363",
+  measurementId: "G-91F871305Z"
+};
+
+let db = null;
+let docRef = null;
+let cloudTimer = null;
+
+try {
+  if (typeof firebase !== 'undefined') {
+    firebase.initializeApp(firebaseConfig);
+    db = firebase.firestore();
+    docRef = db.collection('sketches').doc('current');
+  }
+} catch (e) {
+  db = null;
+}
+
+function layerThumbDataURL(layer, maxDim) {
+  const w = layer.el.width, h = layer.el.height;
+  const scale = Math.min(1, maxDim / Math.max(w, h));
+  const tw = Math.max(1, Math.round(w * scale));
+  const th = Math.max(1, Math.round(h * scale));
+  const t = document.createElement('canvas');
+  t.width = tw; t.height = th;
+  t.getContext('2d').drawImage(layer.el, 0, 0, w, h, 0, 0, tw, th);
+  return t.toDataURL('image/png');
+}
+
+function scheduleCloudSave() {
+  if (!docRef) return;
+  clearTimeout(cloudTimer);
+  cloudTimer = setTimeout(saveToCloud, 1500);
+}
+
+async function saveToCloud() {
+  if (!docRef) return;
+  try {
+    cloudStatus.textContent = '저장 중...';
+    const payload = {
+      updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+      layers: layers.map(l => ({
+        name: l.name,
+        opacity: l.opacity,
+        blend: l.blend,
+        visible: l.visible,
+        dataUrl: layerThumbDataURL(l, 1400)
+      }))
+    };
+    await docRef.set(payload);
+    const now = new Date();
+    const hh = String(now.getHours()).padStart(2, '0');
+    const mm = String(now.getMinutes()).padStart(2, '0');
+    cloudStatus.textContent = hh + ':' + mm + ' 동기화됨';
+  } catch (e) {
+    cloudStatus.textContent = '클라우드 저장 실패';
+  }
+}
+
+async function loadFromCloud() {
+  if (!docRef) return false;
+  try {
+    cloudStatus.textContent = '불러오는 중...';
+    const snap = await docRef.get();
+    if (!snap.exists) { cloudStatus.textContent = '저장된 작업 없음'; return false; }
+    const data = snap.data();
+    if (!data.layers || !data.layers.length) { cloudStatus.textContent = '저장된 작업 없음'; return false; }
+
+    layers = [];
+    activeLayerIndex = 0;
+    for (const Ld of data.layers) {
+      await new Promise((resolve) => {
+        const img = new Image();
+        img.onload = () => {
+          addLayer(Ld.name);
+          const newLayer = layers[activeLayerIndex];
+          newLayer.opacity = Ld.opacity;
+          newLayer.blend = Ld.blend;
+          newLayer.visible = Ld.visible;
+          newLayer.ctx.setTransform(1, 0, 0, 1, 0, 0);
+          newLayer.ctx.clearRect(0, 0, newLayer.el.width, newLayer.el.height);
+          newLayer.ctx.drawImage(img, 0, 0, newLayer.el.width, newLayer.el.height);
+          newLayer.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+          resolve();
+        };
+        img.onerror = resolve;
+        img.src = Ld.dataUrl;
+      });
+    }
+    activeLayerIndex = layers.length - 1;
+    ctx = layers[activeLayerIndex].ctx;
+    history = [];
+    renderLayerPanel();
+    compositeLayers();
+    cloudStatus.textContent = '클라우드에서 불러옴';
+    return true;
+  } catch (e) {
+    cloudStatus.textContent = '클라우드 불러오기 실패';
+    return false;
+  }
+}
 
 let ctx = null; // always points to the ACTIVE layer's 2D context
 let layers = []; // { el, ctx, opacity, blend, visible, name }
@@ -596,6 +709,7 @@ function floodFill(cssX, cssY, fillHex, erase) {
 function scheduleAutosave() {
   clearTimeout(autosaveTimer);
   autosaveTimer = setTimeout(doAutosave, 800);
+  scheduleCloudSave();
 }
 
 function doAutosave() {
@@ -818,6 +932,7 @@ document.getElementById('shareOpt').addEventListener('click', async () => {
 
 // ---------- Init ----------
 resizeCanvas();
+loadFromCloud();
 </script>
 </body>
 </html>
