@@ -1094,11 +1094,34 @@ function smoothstep(a, b, x) {
   return t * t * (3 - 2 * t);
 }
 
-// 사진 → 색칠용 밑그림. 이전에는 700px로 축소 + 단순 임계값(이분화)이라 선이 뭉툭했다.
-// 1) 처리 해상도를 높이고 2) 노이즈를 줄이는 블러를 두 번 먹인 뒤 3) 경계를 딱 자르지 않고
-// 완만하게(안티앨리어싱) 표현해서 더 가늘고 세밀한 선이 나오도록 개선했다.
-function photoToLineArtCanvas(img, lowT, highT) {
-  const procW = Math.min(1100, img.width);
+// 그레이디언트 크기 분포에서 상위 percentile(예: 0.90 = 상위 10%)에 해당하는 값을
+// 임계값으로 잡는다. 사진마다 밝기/대비가 다 달라서 고정된 숫자를 임계값으로 쓰면
+// 어떤 사진은 선이 하나도 안 남고, 어떤 사진은 온통 선 범벅이 된다 — 사진마다
+// 자동으로 맞춰지도록 히스토그램에서 직접 계산한다.
+function computeAdaptiveThreshold(mags, percentile) {
+  let maxMag = 0;
+  for (let i = 0; i < mags.length; i++) if (mags[i] > maxMag) maxMag = mags[i];
+  if (maxMag < 1) return 1;
+  const buckets = 512;
+  const hist = new Uint32Array(buckets);
+  for (let i = 0; i < mags.length; i++) {
+    const b = Math.min(buckets - 1, Math.floor((mags[i] / maxMag) * (buckets - 1)));
+    hist[b]++;
+  }
+  const targetCount = mags.length * (1 - percentile);
+  let cum = 0;
+  for (let b = buckets - 1; b >= 0; b--) {
+    cum += hist[b];
+    if (cum >= targetCount) return (b / (buckets - 1)) * maxMag;
+  }
+  return maxMag * 0.3;
+}
+
+// 사진 → 색칠용 밑그림. 고정된 임계값 숫자를 쓰면 사진마다 밝기/대비가 달라
+// 어떤 사진은 선이 거의 안 남고 어떤 사진은 지저분해졌다. 이제는 각 사진의
+// 실제 경계 강도 분포를 분석해서 임계값을 그때그때 자동으로 계산한다.
+function photoToLineArtCanvas(img, edgePercentile) {
+  const procW = Math.min(1400, img.width);
   const scale = procW / img.width;
   const procH = Math.max(1, Math.round(img.height * scale));
 
@@ -1114,12 +1137,11 @@ function photoToLineArtCanvas(img, lowT, highT) {
   for (let i = 0, p = 0; i < data.length; i += 4, p++) {
     gray[p] = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
   }
-  gray = boxBlurGray(gray, procW, procH);
-  gray = boxBlurGray(gray, procW, procH);
+  gray = boxBlurGray(gray, procW, procH); // 잡티 억제용 약한 블러 1회만
 
   const gxK = [-1, 0, 1, -2, 0, 2, -1, 0, 1];
   const gyK = [-1, -2, -1, 0, 0, 0, 1, 2, 1];
-  const out = new Uint8ClampedArray(procW * procH * 4);
+  const mags = new Float32Array(procW * procH);
 
   for (let y = 0; y < procH; y++) {
     for (let x = 0; x < procW; x++) {
@@ -1133,12 +1155,18 @@ function photoToLineArtCanvas(img, lowT, highT) {
           gy += val * gyK[k];
         }
       }
-      const mag = Math.sqrt(gx * gx + gy * gy);
-      const edgeAmount = smoothstep(lowT, highT, mag); // 0(배경)~1(뚜렷한 경계), 완만하게 전환
-      const v = Math.round(255 * (1 - edgeAmount));
-      const idx = (y * procW + x) * 4;
-      out[idx] = v; out[idx + 1] = v; out[idx + 2] = v; out[idx + 3] = 255;
+      mags[y * procW + x] = Math.sqrt(gx * gx + gy * gy);
     }
+  }
+
+  const threshold = computeAdaptiveThreshold(mags, edgePercentile);
+  const band = Math.max(3, threshold * 0.2); // 살짝만 완만하게(안티앨리어싱), 너무 두껍지 않게
+  const out = new Uint8ClampedArray(procW * procH * 4);
+  for (let i = 0; i < mags.length; i++) {
+    const edgeAmount = smoothstep(threshold - band, threshold + band, mags[i]);
+    const v = Math.round(255 * (1 - edgeAmount));
+    const idx = i * 4;
+    out[idx] = v; out[idx + 1] = v; out[idx + 2] = v; out[idx + 3] = 255;
   }
 
   const outCanvas = document.createElement('canvas');
@@ -1175,7 +1203,7 @@ document.getElementById('photoInput').addEventListener('change', (e) => {
 
         if (mode === 'coloring') {
           autosaveStatus.textContent = '윤곽선 만드는 중...';
-          const lineArt = photoToLineArtCanvas(img, 20, 70);
+          const lineArt = photoToLineArtCanvas(img, 0.90);
           refLayer.ctx.fillStyle = '#ffffff';
           refLayer.ctx.fillRect(0, 0, cw, ch);
           refLayer.ctx.drawImage(lineArt, dx, dy, dw, dh);
