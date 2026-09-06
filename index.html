@@ -182,6 +182,7 @@
     <button class="zoomBtn" id="layerBtn">레이어</button>
     <button class="zoomBtn" id="galleryBtn">작품목록</button>
     <button class="zoomBtn" id="referenceBtn">참고그림</button>
+    <button class="zoomBtn" id="removeReferenceBtn">밑그림 지우기</button>
     <button class="zoomBtn" id="resizeCanvasBtn">크기변경</button>
     <button class="zoomBtn" id="newCanvasBtn">새 캔버스</button>
   </div>
@@ -1047,6 +1048,7 @@ function insertTemplateLayer(key) {
   const isColoring = (key === 'house' || key === 'butterfly');
   refLayer.opacity = isColoring ? 1 : 0.35;
   refLayer.name = templateLabel(key) + (isColoring ? ' (색칠 밑그림)' : ' (연습 안내선)');
+  refLayer.isReference = true;
   addLayer('그리기 레이어');
   renderLayerPanel();
   compositeLayers();
@@ -1214,6 +1216,7 @@ document.getElementById('photoInput').addEventListener('change', (e) => {
           refLayer.opacity = 0.45;
           refLayer.name = '불러온 사진 (밑그림)';
         }
+        refLayer.isReference = true;
 
         refLayer.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
         addLayer('그리기 레이어');
@@ -1229,6 +1232,33 @@ document.getElementById('photoInput').addEventListener('change', (e) => {
   };
   reader.readAsDataURL(file);
   e.target.value = '';
+});
+
+// 색칠/따라그리기가 끝난 뒤 밑그림(참고 레이어)만 골라서 지우는 기능.
+// 레이어 패널에서 직접 찾아 지울 수도 있지만, 색칠 마무리 시 자주 쓰는 동작이라 버튼으로 바로 제공.
+document.getElementById('removeReferenceBtn').addEventListener('click', () => {
+  const refIndices = [];
+  layers.forEach((l, i) => { if (l.isReference) refIndices.push(i); });
+  if (refIndices.length === 0) {
+    alert('지울 밑그림(참고 레이어)이 없습니다.');
+    return;
+  }
+  if (!confirm('밑그림 레이어를 삭제할까요? 색칠/그린 그림은 그대로 남습니다.')) return;
+
+  refIndices.sort((a, b) => b - a).forEach((i) => { layers.splice(i, 1); });
+
+  if (layers.length === 0) {
+    addLayer('레이어 1');
+  } else {
+    activeLayerIndex = Math.max(0, Math.min(activeLayerIndex, layers.length - 1));
+    ctx = layers[activeLayerIndex].ctx;
+  }
+  history = [];
+  redoStack = [];
+  updateUndoRedoButtons();
+  renderLayerPanel();
+  compositeLayers();
+  scheduleAutosave();
 });
 
 function saveHistory() {
