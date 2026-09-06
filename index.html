@@ -36,6 +36,16 @@
     border: 2px solid transparent; flex-shrink: 0; cursor: pointer;
   }
   .colorDot.active { border-color: #fff; }
+  #colorPickerWrap {
+    width: 28px; height: 28px; border-radius: 50%; flex-shrink: 0;
+    background: conic-gradient(red, yellow, lime, cyan, blue, magenta, red);
+    display: block; overflow: hidden; border: 2px solid rgba(255,255,255,0.6);
+    cursor: pointer;
+  }
+  #colorPicker {
+    width: 100%; height: 100%; padding: 0; border: none; background: none;
+    opacity: 0; cursor: pointer;
+  }
   .toolBtn, .brushBtn, .zoomBtn {
     background: #3a3a3c; color: #fff; border: none; border-radius: 10px;
     padding: 8px 11px; font-size: 12.5px; flex-shrink: 0; white-space: nowrap;
@@ -51,10 +61,13 @@
     font-size: 10px; color: #6e6e73; text-align: center; padding: 2px 8px 6px;
     background: #2c2c2e;
   }
-  #undoBtn {
+  #undoRedoGroup {
     position: fixed;
     top: 14px; left: 14px;
     z-index: 30;
+    display: flex; gap: 8px;
+  }
+  #undoBtn, #redoBtn {
     width: 52px; height: 52px;
     border-radius: 50%;
     background: rgba(58,58,60,0.92);
@@ -65,7 +78,8 @@
     box-shadow: 0 2px 10px rgba(0,0,0,0.45);
     -webkit-tap-highlight-color: transparent;
   }
-  #undoBtn:active { background: #ff9500; color: #1c1c1e; }
+  #undoBtn:active, #redoBtn:active { background: #ff9500; color: #1c1c1e; }
+  #undoBtn:disabled, #redoBtn:disabled { opacity: 0.35; }
 
   .sheetOverlay {
     position: fixed; inset: 0; background: rgba(0,0,0,0.5);
@@ -104,7 +118,10 @@
 </head>
 <body>
 <div id="app">
-  <button id="undoBtn" title="되돌리기 (Ctrl+Z)">↺</button>
+  <div id="undoRedoGroup">
+    <button id="undoBtn" title="되돌리기 (Ctrl+Z)">↺</button>
+    <button id="redoBtn" title="다시하기 (Ctrl+Shift+Z)">↻</button>
+  </div>
   <div id="canvasWrap">
     <canvas id="canvas"></canvas>
   </div>
@@ -134,6 +151,9 @@
     <button class="brushBtn" data-brush="fill">채우기</button>
   </div>
   <div id="toolbar">
+    <label id="colorPickerWrap" title="색상 직접 선택 (전체 색상)">
+      <input type="color" id="colorPicker" value="#000000">
+    </label>
     <div class="colorDot active" style="background:#000000" data-color="#000000"></div>
     <div class="colorDot" style="background:#ff3b30" data-color="#ff3b30"></div>
     <div class="colorDot" style="background:#ff9500" data-color="#ff9500"></div>
@@ -339,6 +359,8 @@ async function openWork(id) {
     activeLayerIndex = layers.length - 1;
     ctx = layers[activeLayerIndex].ctx;
     history = [];
+    redoStack = [];
+    updateUndoRedoButtons();
     renderLayerPanel();
     compositeLayers();
     fitZoomToContainer();
@@ -371,6 +393,7 @@ let layers = []; // { el, ctx, opacity, blend, visible, name }
 let activeLayerIndex = 0;
 
 let history = [];
+let redoStack = [];
 let currentColor = '#000000';
 let currentSize = 8;
 let isEraser = false;
@@ -420,6 +443,8 @@ function addLayer(name, copyFromEl) {
   activeLayerIndex = insertIdx;
   ctx = layer.ctx;
   history = [];
+  redoStack = [];
+  updateUndoRedoButtons();
   renderLayerPanel();
   compositeLayers();
 }
@@ -471,6 +496,8 @@ function bindLayerRowEvents() {
       activeLayerIndex = parseInt(el.dataset.idx);
       ctx = layers[activeLayerIndex].ctx;
       history = [];
+      redoStack = [];
+      updateUndoRedoButtons();
       renderLayerPanel();
     });
   });
@@ -538,6 +565,8 @@ document.getElementById('delLayerBtn').addEventListener('click', () => {
   activeLayerIndex = Math.max(0, activeLayerIndex - 1);
   ctx = layers[activeLayerIndex].ctx;
   history = [];
+  redoStack = [];
+  updateUndoRedoButtons();
   renderLayerPanel();
   compositeLayers();
   scheduleAutosave();
@@ -570,6 +599,8 @@ function startNewCanvas(w, h) {
   layers = [];
   activeLayerIndex = 0;
   history = [];
+  redoStack = [];
+  updateUndoRedoButtons();
   setupCanvasSize(w, h);
   addLayer('레이어 1');
   fitZoomToContainer();
@@ -598,6 +629,8 @@ function resizeExistingCanvas(w, h) {
   });
   ctx = layers[activeLayerIndex].ctx;
   history = [];
+  redoStack = [];
+  updateUndoRedoButtons();
   compositeLayers();
   fitZoomToContainer();
   document.getElementById('newCanvasMenu').classList.remove('open');
@@ -908,6 +941,15 @@ document.getElementById('photoInput').addEventListener('change', (e) => {
 function saveHistory() {
   history.push(ctx.getImageData(0, 0, canvas.width, canvas.height));
   if (history.length > 20) history.shift();
+  redoStack = [];
+  updateUndoRedoButtons();
+}
+
+function updateUndoRedoButtons() {
+  const u = document.getElementById('undoBtn');
+  const r = document.getElementById('redoBtn');
+  if (u) u.disabled = history.length === 0;
+  if (r) r.disabled = redoStack.length === 0;
 }
 
 function getPos(e) {
@@ -1315,7 +1357,15 @@ document.querySelectorAll('.colorDot').forEach(dot => {
     currentColor = dot.dataset.color;
     isEraser = false;
     document.getElementById('eraserBtn').classList.remove('active');
+    document.getElementById('colorPicker').value = currentColor;
   });
+});
+
+document.getElementById('colorPicker').addEventListener('input', (e) => {
+  currentColor = e.target.value;
+  isEraser = false;
+  document.getElementById('eraserBtn').classList.remove('active');
+  document.querySelectorAll('.colorDot').forEach(d => d.classList.remove('active'));
 });
 
 document.querySelectorAll('.brushBtn').forEach(btn => {
@@ -1337,16 +1387,35 @@ document.getElementById('eraserBtn').addEventListener('click', (e) => {
 
 document.getElementById('undoBtn').addEventListener('click', () => {
   if (!ctx || history.length === 0) return;
+  const current = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  redoStack.push(current);
+  if (redoStack.length > 20) redoStack.shift();
   const imgData = history.pop();
   ctx.putImageData(imgData, 0, 0);
   compositeLayers();
+  updateUndoRedoButtons();
+  scheduleAutosave();
+});
+
+document.getElementById('redoBtn').addEventListener('click', () => {
+  if (!ctx || redoStack.length === 0) return;
+  const current = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  history.push(current);
+  if (history.length > 20) history.shift();
+  const imgData = redoStack.pop();
+  ctx.putImageData(imgData, 0, 0);
+  compositeLayers();
+  updateUndoRedoButtons();
   scheduleAutosave();
 });
 
 document.addEventListener('keydown', (e) => {
-  if ((e.ctrlKey || e.metaKey) && (e.key === 'z' || e.key === 'Z')) {
+  if ((e.ctrlKey || e.metaKey) && !e.shiftKey && (e.key === 'z' || e.key === 'Z')) {
     e.preventDefault();
     document.getElementById('undoBtn').click();
+  } else if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || (e.shiftKey && (e.key === 'z' || e.key === 'Z')))) {
+    e.preventDefault();
+    document.getElementById('redoBtn').click();
   }
 });
 
