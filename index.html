@@ -1070,8 +1070,35 @@ document.getElementById('loadPhotoColoringBtn').addEventListener('click', () => 
 
 // 사진의 밝기 변화(가장자리)만 뽑아내 선으로 남기고 나머지는 흰색으로 만드는 간단한 소벨(Sobel) 엣지 검출.
 // 원본 해상도 그대로 처리하면 느려질 수 있어 처리용으로 축소했다가, 결과만 레이어 크기에 맞춰 다시 그린다.
-function photoToLineArtCanvas(img, threshold) {
-  const procW = Math.min(700, img.width);
+function boxBlurGray(src, w, h) {
+  const out = new Float32Array(w * h);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      let sum = 0, count = 0;
+      for (let ky = -1; ky <= 1; ky++) {
+        for (let kx = -1; kx <= 1; kx++) {
+          const px = Math.min(w - 1, Math.max(0, x + kx));
+          const py = Math.min(h - 1, Math.max(0, y + ky));
+          sum += src[py * w + px];
+          count++;
+        }
+      }
+      out[y * w + x] = sum / count;
+    }
+  }
+  return out;
+}
+
+function smoothstep(a, b, x) {
+  const t = Math.max(0, Math.min(1, (x - a) / (b - a)));
+  return t * t * (3 - 2 * t);
+}
+
+// 사진 → 색칠용 밑그림. 이전에는 700px로 축소 + 단순 임계값(이분화)이라 선이 뭉툭했다.
+// 1) 처리 해상도를 높이고 2) 노이즈를 줄이는 블러를 두 번 먹인 뒤 3) 경계를 딱 자르지 않고
+// 완만하게(안티앨리어싱) 표현해서 더 가늘고 세밀한 선이 나오도록 개선했다.
+function photoToLineArtCanvas(img, lowT, highT) {
+  const procW = Math.min(1100, img.width);
   const scale = procW / img.width;
   const procH = Math.max(1, Math.round(img.height * scale));
 
@@ -1083,10 +1110,12 @@ function photoToLineArtCanvas(img, threshold) {
   const imgData = sctx.getImageData(0, 0, procW, procH);
   const data = imgData.data;
 
-  const gray = new Float32Array(procW * procH);
+  let gray = new Float32Array(procW * procH);
   for (let i = 0, p = 0; i < data.length; i += 4, p++) {
     gray[p] = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
   }
+  gray = boxBlurGray(gray, procW, procH);
+  gray = boxBlurGray(gray, procW, procH);
 
   const gxK = [-1, 0, 1, -2, 0, 2, -1, 0, 1];
   const gyK = [-1, -2, -1, 0, 0, 0, 1, 2, 1];
@@ -1105,7 +1134,8 @@ function photoToLineArtCanvas(img, threshold) {
         }
       }
       const mag = Math.sqrt(gx * gx + gy * gy);
-      const v = mag > threshold ? 0 : 255;
+      const edgeAmount = smoothstep(lowT, highT, mag); // 0(배경)~1(뚜렷한 경계), 완만하게 전환
+      const v = Math.round(255 * (1 - edgeAmount));
       const idx = (y * procW + x) * 4;
       out[idx] = v; out[idx + 1] = v; out[idx + 2] = v; out[idx + 3] = 255;
     }
@@ -1145,7 +1175,7 @@ document.getElementById('photoInput').addEventListener('change', (e) => {
 
         if (mode === 'coloring') {
           autosaveStatus.textContent = '윤곽선 만드는 중...';
-          const lineArt = photoToLineArtCanvas(img, 60);
+          const lineArt = photoToLineArtCanvas(img, 20, 70);
           refLayer.ctx.fillStyle = '#ffffff';
           refLayer.ctx.fillRect(0, 0, cw, ch);
           refLayer.ctx.drawImage(lineArt, dx, dy, dw, dh);
