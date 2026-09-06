@@ -271,6 +271,7 @@
     <div class="sheetCard">
       <h3>참고그림 불러오기</h3>
       <button class="saveOpt" id="loadPhotoBtn">내 사진 불러오기<small>사진을 흐리게 깔아두고 따라 그리기</small></button>
+      <button class="saveOpt" id="loadPhotoColoringBtn">사진으로 색칠 밑그림 만들기<small>사진의 색은 지우고 윤곽선만 남겨서 색칠하기</small></button>
       <div style="margin:10px 0 4px; color:#8e8e93; font-size:12px;">스케치 선생님 — 선 따라 그리기 연습</div>
       <button class="saveOpt" data-tpl="circle">동그라미 연습</button>
       <button class="saveOpt" data-tpl="cube">정육면체 연습</button>
@@ -283,6 +284,7 @@
     </div>
   </div>
   <input type="file" id="photoInput" accept="image/*" style="display:none;">
+
 
   <div id="newCanvasMenu" class="sheetOverlay open">
     <div class="sheetCard">
@@ -915,6 +917,7 @@ document.getElementById('closeGalleryMenu').addEventListener('click', () => gall
 // ---------- 스케치 선생님 / 색칠하기 / 사진 불러오기 (참고 레이어) ----------
 
 const templateMenu = document.getElementById('templateMenu');
+let photoImportMode = 'trace'; // 'trace' 흐리게 따라그리기 | 'coloring' 윤곽선만 남겨 색칠하기
 
 document.getElementById('referenceBtn').addEventListener('click', () => {
   if (!canvasLogicalW) { alert('먼저 캔버스를 시작해주세요.'); return; }
@@ -1048,28 +1051,98 @@ document.querySelectorAll('#templateMenu .saveOpt[data-tpl]').forEach(btn => {
 });
 
 document.getElementById('loadPhotoBtn').addEventListener('click', () => {
+  photoImportMode = 'trace';
   document.getElementById('photoInput').click();
 });
+
+document.getElementById('loadPhotoColoringBtn').addEventListener('click', () => {
+  photoImportMode = 'coloring';
+  document.getElementById('photoInput').click();
+});
+
+// 사진의 밝기 변화(가장자리)만 뽑아내 선으로 남기고 나머지는 흰색으로 만드는 간단한 소벨(Sobel) 엣지 검출.
+// 원본 해상도 그대로 처리하면 느려질 수 있어 처리용으로 축소했다가, 결과만 레이어 크기에 맞춰 다시 그린다.
+function photoToLineArtCanvas(img, threshold) {
+  const procW = Math.min(700, img.width);
+  const scale = procW / img.width;
+  const procH = Math.max(1, Math.round(img.height * scale));
+
+  const srcCanvas = document.createElement('canvas');
+  srcCanvas.width = procW;
+  srcCanvas.height = procH;
+  const sctx = srcCanvas.getContext('2d');
+  sctx.drawImage(img, 0, 0, procW, procH);
+  const imgData = sctx.getImageData(0, 0, procW, procH);
+  const data = imgData.data;
+
+  const gray = new Float32Array(procW * procH);
+  for (let i = 0, p = 0; i < data.length; i += 4, p++) {
+    gray[p] = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+  }
+
+  const gxK = [-1, 0, 1, -2, 0, 2, -1, 0, 1];
+  const gyK = [-1, -2, -1, 0, 0, 0, 1, 2, 1];
+  const out = new Uint8ClampedArray(procW * procH * 4);
+
+  for (let y = 0; y < procH; y++) {
+    for (let x = 0; x < procW; x++) {
+      let gx = 0, gy = 0, k = 0;
+      for (let ky = -1; ky <= 1; ky++) {
+        for (let kx = -1; kx <= 1; kx++, k++) {
+          const px = Math.min(procW - 1, Math.max(0, x + kx));
+          const py = Math.min(procH - 1, Math.max(0, y + ky));
+          const val = gray[py * procW + px];
+          gx += val * gxK[k];
+          gy += val * gyK[k];
+        }
+      }
+      const mag = Math.sqrt(gx * gx + gy * gy);
+      const v = mag > threshold ? 0 : 255;
+      const idx = (y * procW + x) * 4;
+      out[idx] = v; out[idx + 1] = v; out[idx + 2] = v; out[idx + 3] = 255;
+    }
+  }
+
+  const outCanvas = document.createElement('canvas');
+  outCanvas.width = procW;
+  outCanvas.height = procH;
+  outCanvas.getContext('2d').putImageData(new ImageData(out, procW, procH), 0, 0);
+  return outCanvas;
+}
 
 document.getElementById('photoInput').addEventListener('change', (e) => {
   const file = e.target.files && e.target.files[0];
   if (!file) return;
+  const mode = photoImportMode;
   const reader = new FileReader();
   reader.onload = (ev) => {
     const img = new Image();
     img.onload = () => {
-      addLayer('불러온 사진');
+      addLayer(mode === 'coloring' ? '사진 색칠 밑그림' : '불러온 사진');
       const refLayer = layers[activeLayerIndex];
       const cw = refLayer.el.width, ch = refLayer.el.height;
       const scale = Math.min(cw / img.width, ch / img.height);
       const dw = img.width * scale, dh = img.height * scale;
       const dx = (cw - dw) / 2, dy = (ch - dh) / 2;
+
       refLayer.ctx.setTransform(1, 0, 0, 1, 0, 0);
       refLayer.ctx.clearRect(0, 0, cw, ch);
-      refLayer.ctx.drawImage(img, dx, dy, dw, dh);
+
+      if (mode === 'coloring') {
+        autosaveStatus.textContent = '윤곽선 만드는 중...';
+        const lineArt = photoToLineArtCanvas(img, 60);
+        refLayer.ctx.fillStyle = '#ffffff';
+        refLayer.ctx.fillRect(0, 0, cw, ch);
+        refLayer.ctx.drawImage(lineArt, dx, dy, dw, dh);
+        refLayer.opacity = 1;
+        refLayer.name = '사진 색칠 밑그림';
+      } else {
+        refLayer.ctx.drawImage(img, dx, dy, dw, dh);
+        refLayer.opacity = 0.45;
+        refLayer.name = '불러온 사진 (밑그림)';
+      }
+
       refLayer.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      refLayer.opacity = 0.45;
-      refLayer.name = '불러온 사진 (밑그림)';
       addLayer('그리기 레이어');
       renderLayerPanel();
       compositeLayers();
