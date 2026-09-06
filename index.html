@@ -487,7 +487,7 @@ let drawing = false;
 let p0 = null, p1 = null;
 let lastT = 0;
 let lastPressure = 0.5;
-let dpr = window.devicePixelRatio || 1;
+let dpr = Math.min(window.devicePixelRatio || 1, 2); // 3배율 이상 기기에서 캔버스가 과도하게 커져 느려지는 것을 방지
 let zoomLevel = 1;
 let cssWidth = 0, cssHeight = 0;
 let canvasLogicalW = 0, canvasLogicalH = 0;
@@ -534,8 +534,27 @@ function addLayer(name, copyFromEl) {
   compositeLayers();
 }
 
-function compositeLayers() {
+function compositeLayers(dirty) {
   dctx.setTransform(1, 0, 0, 1, 0, 0);
+  if (dirty) {
+    dctx.save();
+    dctx.beginPath();
+    dctx.rect(dirty.x, dirty.y, dirty.w, dirty.h);
+    dctx.clip();
+    dctx.clearRect(dirty.x, dirty.y, dirty.w, dirty.h);
+    dctx.fillStyle = '#ffffff';
+    dctx.fillRect(dirty.x, dirty.y, dirty.w, dirty.h);
+    for (const layer of layers) {
+      if (!layer.visible) continue;
+      dctx.globalAlpha = layer.opacity;
+      dctx.globalCompositeOperation = layer.blend;
+      dctx.drawImage(layer.el, 0, 0);
+    }
+    dctx.globalAlpha = 1;
+    dctx.globalCompositeOperation = 'source-over';
+    dctx.restore();
+    return;
+  }
   dctx.clearRect(0, 0, canvas.width, canvas.height);
   dctx.fillStyle = '#ffffff';
   dctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -547,6 +566,25 @@ function compositeLayers() {
   }
   dctx.globalAlpha = 1;
   dctx.globalCompositeOperation = 'source-over';
+}
+
+// 스트로크 도중 매 프레임 전체 캔버스를 다시 합성하면 캔버스가 클수록 느려진다.
+// 실제로 획이 지나간 작은 영역(더티 렉트)만 다시 합성해서 지연을 없앤다.
+function dirtyRectFromPoints(points, paddingCss) {
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  points.forEach((p) => {
+    if (p.x < minX) minX = p.x;
+    if (p.y < minY) minY = p.y;
+    if (p.x > maxX) maxX = p.x;
+    if (p.y > maxY) maxY = p.y;
+  });
+  minX -= paddingCss; minY -= paddingCss;
+  maxX += paddingCss; maxY += paddingCss;
+  const x = Math.max(0, Math.floor(minX * dpr));
+  const y = Math.max(0, Math.floor(minY * dpr));
+  const x2 = Math.min(canvas.width, Math.ceil(maxX * dpr));
+  const y2 = Math.min(canvas.height, Math.ceil(maxY * dpr));
+  return { x, y, w: Math.max(1, x2 - x), h: Math.max(1, y2 - y) };
 }
 
 function renderLayerPanel() {
@@ -1101,9 +1139,9 @@ function drawPencilCurve(x0, y0, cx, cy, x1, y1, pressure) {
 function drawOilCurve(x0, y0, cx, cy, x1, y1) {
   if (isEraser) { drawPencilCurve(x0, y0, cx, cy, x1, y1, 1); return; }
   const rgb = hexToRgb(currentColor);
-  const pts = curvePoints(x0, y0, cx, cy, x1, y1, 6);
+  const pts = curvePoints(x0, y0, cx, cy, x1, y1, 4);
   ctx.globalCompositeOperation = 'multiply';
-  const bristles = 6;
+  const bristles = 4;
   for (let i = 0; i < pts.length - 1; i++) {
     const a = pts[i], b = pts[i + 1];
     const dx = b.x - a.x, dy = b.y - a.y;
@@ -1128,7 +1166,7 @@ function drawWatercolorCurve(x0, y0, cx, cy, x1, y1) {
   if (isEraser) { drawPencilCurve(x0, y0, cx, cy, x1, y1, 1); return; }
   const rgb = hexToRgb(currentColor);
   const approxLen = Math.hypot(x1 - x0, y1 - y0) + Math.hypot(cx - x0, cy - y0);
-  const steps = Math.max(2, Math.floor(approxLen / 3));
+  const steps = Math.max(2, Math.floor(approxLen / 6));
   const pts = curvePoints(x0, y0, cx, cy, x1, y1, steps);
   ctx.globalCompositeOperation = 'multiply';
   for (const pt of pts) {
@@ -1367,14 +1405,17 @@ function startDraw(e) {
 
   if (brushType === 'airbrush') {
     sprayAirbrush(p.x, p.y);
-    compositeLayers();
+    compositeLayers(dirtyRectFromPoints([p], currentSize * 2 + 30));
     clearInterval(airbrushTimer);
-    airbrushTimer = setInterval(() => { sprayAirbrush(p1.x, p1.y); compositeLayers(); }, 45);
+    airbrushTimer = setInterval(() => {
+      sprayAirbrush(p1.x, p1.y);
+      compositeLayers(dirtyRectFromPoints([p1], currentSize * 2 + 30));
+    }, 45);
   } else if (brushType === 'line') {
-    compositeLayers();
+    compositeLayers(dirtyRectFromPoints([p], currentSize + 20));
   } else {
     stampDot(p.x, p.y, pressure);
-    compositeLayers();
+    compositeLayers(dirtyRectFromPoints([p], currentSize * 3 + 30));
   }
 }
 
@@ -1417,14 +1458,14 @@ function draw(e) {
     ctx.stroke();
     ctx.globalCompositeOperation = 'source-over';
     p1 = p2; lastT = now; lastPressure = pressure;
-    compositeLayers();
+    compositeLayers(dirtyRectFromPoints([p0, p2], currentSize + 20));
     return;
   }
 
   if (brushType === 'airbrush') {
     sprayAirbrush(p2.x, p2.y);
     p1 = p2; lastT = now; lastPressure = pressure;
-    compositeLayers();
+    compositeLayers(dirtyRectFromPoints([p2], currentSize * 2 + 30));
     return;
   }
 
@@ -1438,7 +1479,8 @@ function draw(e) {
   else drawPencilCurve(midA.x, midA.y, p1.x, p1.y, midB.x, midB.y, pressure);
 
   p0 = p1; p1 = p2; lastT = now; lastPressure = pressure;
-  compositeLayers();
+  const dirtyPad = (brushType === 'watercolor') ? currentSize * 3 + 30 : currentSize * 2 + 30;
+  compositeLayers(dirtyRectFromPoints([midA, p1, midB], dirtyPad));
 }
 
 function endDraw(e) {
