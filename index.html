@@ -1099,23 +1099,29 @@ function smoothstep(a, b, x) {
   return t * t * (3 - 2 * t);
 }
 
-// 그레이디언트 크기 분포에서 상위 percentile(예: 0.94 = 상위 6%)에 해당하는 값을
-// 임계값으로 잡는다. 사진마다 밝기/대비가 다 달라서 고정된 임계값을 쓰면
-// 어떤 사진은 선이 하나도 안 남고, 어떤 사진은 온통 선 범벅이 된다 — 사진마다
-// 자동으로 맞춰지도록 히스토그램에서 직접 계산한다. mag가 0인(비최대) 픽셀은
-// 이미 얇게 걸러진 상태라 통계에서 제외해야 임계값이 왜곡되지 않는다.
+// 부동소수점 오차 때문에, 완전히 평평한(그레이디언트가 0인) 영역에서도 이웃끼리 값이
+// 미세하게 같아져(예: 2.8e-14) 국소 최대 판정을 통과해버리는 경우가 있다. 이런 잡음은
+// 진짜 경계(수십~수백 단위)보다 압도적으로 작으므로, 이 값보다 작으면 아예 0으로 취급해
+// 임계값 계산이 잡음에 오염되지 않도록 한다.
+const EDGE_EPS = 1;
+
+// 그레이디언트 크기 분포에서 상위 percentile에 해당하는 값을 임계값으로 잡는다.
+// 사진마다 밝기/대비가 다 달라서 고정된 임계값을 쓰면 어떤 사진은 선이 하나도 안
+// 남고, 어떤 사진은 온통 선 범벅이 된다 — 사진마다 자동으로 맞춰지도록 히스토그램에서
+// 직접 계산한다. mag가 EDGE_EPS 이하인(비최대) 픽셀은 이미 걸러진 상태라 통계에서
+// 제외해야 임계값이 왜곡되지 않는다.
 function computeAdaptiveThreshold(mags, percentile) {
   let maxMag = 0;
   let nonZeroCount = 0;
   for (let i = 0; i < mags.length; i++) {
     if (mags[i] > maxMag) maxMag = mags[i];
-    if (mags[i] > 0) nonZeroCount++;
+    if (mags[i] > EDGE_EPS) nonZeroCount++;
   }
   if (maxMag < 1 || nonZeroCount === 0) return 1;
   const buckets = 512;
   const hist = new Uint32Array(buckets);
   for (let i = 0; i < mags.length; i++) {
-    if (mags[i] <= 0) continue;
+    if (mags[i] <= EDGE_EPS) continue;
     const b = Math.min(buckets - 1, Math.floor((mags[i] / maxMag) * (buckets - 1)));
     hist[b]++;
   }
@@ -1131,11 +1137,16 @@ function computeAdaptiveThreshold(mags, percentile) {
 // 그레이디언트 방향으로 이웃 두 픽셀과 비교해서, 그 방향으로 가장 강한(국소 최대) 픽셀만
 // 남기고 나머지는 0으로 지운다 — 캐니(Canny) 엣지 검출의 핵심 아이디어로, 두꺼운 얼룩
 // 대신 한 두 픽셀 굵기의 가느다란 선을 직접 얻을 수 있다.
+// (실측으로 찾은 버그 수정: mag가 EDGE_EPS 이하면 애초에 비교 없이 0 처리한다 — 평평한
+// 영역에서 부동소수점 오차로 이웃과 "같아져서" 국소 최대로 잘못 통과되던 것을 막는다.
+// 이게 빠지면 사진의 평평한 부분 전체가 얼룩덜룩한 "경계"로 잘못 인식돼 화면이
+// 새까맣게 나온다 — 실제로 이 버그 때문에 밑그림이 온통 검게 나왔었다.)
 function nonMaxSuppress(gx, gy, mag, w, h) {
   const out = new Float32Array(w * h);
   for (let y = 1; y < h - 1; y++) {
     for (let x = 1; x < w - 1; x++) {
       const idx = y * w + x;
+      if (mag[idx] <= EDGE_EPS) continue;
       let angle = Math.atan2(gy[idx], gx[idx]) * 180 / Math.PI;
       if (angle < 0) angle += 180;
       let n1, n2;
@@ -1230,7 +1241,9 @@ function photoToLineArtCanvas(img, edgePercentile) {
   for (let i = 0, p = 0; i < data.length; i += 4, p++) {
     gray[p] = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
   }
-  // 텍스처가 많은(복잡한) 사진에서 자잘한 얼룩이 잔뜩 나오지 않도록 세 번 흐림 처리 (약한 가우시안 흐림 효과)
+  // 텍스처가 많은(복잡한) 사진에서 자잘한 얼룩이 잔뜩 나오지 않도록 다섯 번 흐림 처리 (약한 가우시안 흐림 효과)
+  gray = boxBlurGray(gray, procW, procH);
+  gray = boxBlurGray(gray, procW, procH);
   gray = boxBlurGray(gray, procW, procH);
   gray = boxBlurGray(gray, procW, procH);
   gray = boxBlurGray(gray, procW, procH);
@@ -1267,7 +1280,7 @@ function photoToLineArtCanvas(img, edgePercentile) {
   for (let i = 0; i < thin.length; i++) {
     isBlack[i] = smoothstep(threshold - band, threshold + band, thin[i]) > 0.5 ? 1 : 0;
   }
-  removeSpeckles(isBlack, procW, procH, 4);
+  removeSpeckles(isBlack, procW, procH, 12);
   isBlack = dilate(isBlack, procW, procH, 1);
 
   const out = new Uint8ClampedArray(procW * procH * 4);
@@ -1311,7 +1324,7 @@ document.getElementById('photoInput').addEventListener('change', (e) => {
 
         if (mode === 'coloring') {
           autosaveStatus.textContent = '윤곽선 만드는 중...';
-          const lineArt = photoToLineArtCanvas(img, 0.94);
+          const lineArt = photoToLineArtCanvas(img, 0.45);
           refLayer.ctx.fillStyle = '#ffffff';
           refLayer.ctx.fillRect(0, 0, cw, ch);
           refLayer.ctx.imageSmoothingEnabled = false; // 확대해서 그릴 때 선이 흐려지지 않도록
